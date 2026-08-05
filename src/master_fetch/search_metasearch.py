@@ -49,36 +49,32 @@ random = SystemRandom()
 
 T = TypeVar("T")
 
-_PROXY_RAW = (
-    os.environ.get("HOUND_SEARCH_PROXY")
-    or os.environ.get("HTTPS_PROXY")
-    or os.environ.get("https_proxy")
-    or os.environ.get("ALL_PROXY")
-    or os.environ.get("all_proxy")
-    or None
-)
+# Proxy rotation: env var HOUND_SEARCH_PROXY (comma-separated for multiple),
+# HTTPS_PROXY/HTTP_PROXY/ALL_PROXY fallbacks, or config file
+# ~/.hound/search_proxies.json. See search_proxy.py.
+# _PROXY is set dynamically per search call by _get_search_proxy() below.
+_PROXY: str | None = None  # current proxy for this search call (set by metasearch)
+_proxy_pool = None  # lazily initialized ProxyPool (see _get_search_proxy)
 
-# Validate proxy: strip whitespace, verify scheme. Invalid proxies fall back to
-# direct connection with a warning (Bug fix: whitespace crashed DDG/httpx,
-# invalid schemes caused silent 0 results).
-_VALID_PROXY_SCHEMES = ("http://", "https://", "socks5://", "socks5h://")
 
-def _validate_proxy(raw: str | None) -> str | None:
-    """Strip and scheme-validate a proxy URL. Returns None if invalid/empty."""
-    if not raw:
-        return None
-    p = raw.strip()
-    if not p:
-        return None
-    if not any(p.startswith(s) for s in _VALID_PROXY_SCHEMES):
-        logger.warning(
-            "Invalid proxy scheme in %r (must be http/https/socks5/socks5h). "
-            "Falling back to direct connection.", raw
-        )
-        return None
-    return p
+def _get_search_proxy() -> str | None:
+    """Get the next proxy from the rotation pool for this search call.
 
-_PROXY = _validate_proxy(_PROXY_RAW)
+    Returns None if no proxies are configured (direct connection) or if all
+    proxies are cooled. Also sets the module-level ``_PROXY`` so
+    ``search_engines.py`` lazy imports see the current proxy.
+    """
+    global _PROXY, _proxy_pool
+    from master_fetch.search_proxy import get_proxy_pool
+    pool = get_proxy_pool()
+    if pool is None:
+        _PROXY = None
+        return None
+    proxy = pool.get_proxy()
+    # If all proxies are cooled, fall back to direct (None = no proxy).
+    _PROXY = proxy
+    return proxy
+
 # Per-engine + overall deadline. Engines run in parallel + we early-return on
 # quorum, so a healthy search is ~1-2s; this bounds a fully-throttled one.
 _SEARCH_DEADLINE = float(os.environ.get("HOUND_SEARCH_DEADLINE", "16") or "16")
@@ -857,6 +853,8 @@ async def metasearch(
     """
     backends = _resolve_backends(engines)
     status: dict[str, str] = {}
+    # Rotate proxies per search call so no single IP gets rate-limited.
+    _search_proxy = _get_search_proxy()
     # One engine instance per backend (cheap; primp/httpx clients are light).
     # Circuit breaker: skip backends that recently blocked us (CAPTCHA/403/rate-
     # limit) for a cooldown, so we don't keep firing at a host that is actively
@@ -870,13 +868,13 @@ async def metasearch(
             status[b] = "circuit_open"
             continue
         try:
-            instances[b] = cls(proxy=_PROXY, timeout=int(_SEARCH_DEADLINE), verify=True)
+            instances[b] = cls(proxy=_search_proxy, timeout=int(_SEARCH_DEADLINE), verify=True)
         except Exception as ex:  # construction failure (e.g. primp missing) -> skip
             logger.debug("engine %s init failed: %r", b, ex)
             status[b] = f"init_error:{type(ex).__name__}"
 
     if not instances and not _BRIGHTDATA_API_KEY:
-        proxy_note = f" (proxy in use: {_PROXY})" if _PROXY else ""
+        proxy_note = f" (proxy in use: {_search_proxy})" if _search_proxy else ""
         raise MetaSearchException(
             f"No search engines could start{proxy_note}. "
             f"Engine status: {status}. "
@@ -1007,4 +1005,20 @@ async def metasearch(
     # freeze backends sets to sorted lists for the caller
     for e in order:
         e["backends"] = sorted(e["backends"])
+
+    # Proxy health tracking: if all engines failed with connection errors
+    # (not just empty), the proxy is bad - cool it. If any engine succeeded,
+    # the proxy is healthy - mark success. Only track when a proxy was used.
+    if _search_proxy:
+        from master_fetch.search_proxy import get_proxy_pool
+        pool = get_proxy_pool()
+        if pool is not None:
+            has_connection_errors = any(
+                v.startswith("error:") or v == "timeout" for v in status.values()
+            )
+            if engines_ok == 0 and has_connection_errors:
+                pool.mark_failed(_search_proxy)
+            elif engines_ok > 0:
+                pool.mark_success(_search_proxy)
+
     return order, status

@@ -391,9 +391,11 @@ async def _sitemap_map(url: str, path_include: Optional[list[str]],
     from master_fetch.sitemap import discover_sitemap, SitemapURL
 
     def _make_http_get():
+        from master_fetch.search_proxy import get_next_proxy
+        _sitemap_proxy = get_next_proxy()
         try:
             import primp  # type: ignore
-            client = primp.Client(proxy=None, timeout=15, impersonate="random",
+            client = primp.Client(proxy=_sitemap_proxy, timeout=15, impersonate="random",
                                   impersonate_os="random", verify=True)
         except Exception:
             client = None
@@ -606,11 +608,15 @@ async def smart_crawl(
         are not retried (they will fail again).
         """
         async with sem:
+            # Rotate through proxy pool so crawl pages don't hammer one IP.
+            from master_fetch.search_proxy import get_next_proxy, get_proxy_pool
+            _crawl_proxy = get_next_proxy()
             try:
                 resp = await server.smart_fetch(
                     url=u, extraction_type="html", cache_ttl=cache_ttl,
                     max_content_chars=200000, force_fetcher=force_fetcher,
                     respect_robots=respect_robots, timeout=timeout,
+                    proxy=_crawl_proxy,
                 )
             except Exception as e:
                 # Retry once for transient errors (timeout/reset)
@@ -621,6 +627,7 @@ async def smart_crawl(
                             url=u, extraction_type="html", cache_ttl=cache_ttl,
                             max_content_chars=200000, force_fetcher=force_fetcher,
                             respect_robots=respect_robots, timeout=timeout,
+                            proxy=_crawl_proxy,
                         )
                     except Exception as e2:
                         # Lazy import to break circular dependency:
@@ -635,6 +642,15 @@ async def smart_crawl(
                     from master_fetch.server import ResponseModel
                     resp = ResponseModel(url=u, status=-1, content=[""],
                                          fetcher_used="none", error=str(e)[:200])
+            # Proxy health tracking: success marks the proxy healthy, a failed
+            # fetch cools it so the next crawl page uses a different IP.
+            if _crawl_proxy:
+                pool = get_proxy_pool()
+                if pool is not None:
+                    if resp.status > 0:
+                        pool.mark_success(_crawl_proxy)
+                    else:
+                        pool.mark_failed(_crawl_proxy)
         html = resp.content[0] if resp.content else ""
         return u, resp, html
 

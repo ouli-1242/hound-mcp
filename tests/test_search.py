@@ -420,61 +420,46 @@ class TestEngineConfig:
 # ─── Proxy validation (upstream 11.1.9) ───────────────────────────
 
 class TestSearchProxyValidation:
-    def test_whitespace_stripped(self):
+    def _load_with(self, monkeypatch, tmp_path, env_value):
+        """Load proxies from the env var + an empty config file (isolated)."""
+        from master_fetch import search_proxy as sp
+        if env_value is None:
+            monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
+        else:
+            monkeypatch.setenv("HOUND_SEARCH_PROXY", env_value)
+        monkeypatch.setattr(sp, "_config_path", lambda: tmp_path / "no_such_proxies.json")
+        sp.reset_pool()
+        return sp.load_proxies()
+
+    def test_whitespace_stripped(self, monkeypatch, tmp_path):
         """Leading/trailing whitespace is stripped so httpx doesn't crash."""
-        import os, importlib
-        os.environ["HOUND_SEARCH_PROXY"] = " http://proxy:8080 "
-        import master_fetch.search_metasearch as m
-        importlib.reload(m)
-        try:
-            assert m._PROXY == "http://proxy:8080"
-        finally:
-            os.environ.pop("HOUND_SEARCH_PROXY", None)
-            importlib.reload(m)
+        proxies = self._load_with(monkeypatch, tmp_path, " http://proxy:8080 ")
+        assert proxies == ["http://proxy:8080"]
 
-    def test_whitespace_only_nulled(self):
-        """Whitespace-only proxy becomes None, not a crash-inducing string."""
-        import os, importlib
-        os.environ["HOUND_SEARCH_PROXY"] = "   "
-        import master_fetch.search_metasearch as m
-        importlib.reload(m)
-        try:
-            assert m._PROXY is None
-        finally:
-            os.environ.pop("HOUND_SEARCH_PROXY", None)
-            importlib.reload(m)
+    def test_whitespace_only_nulled(self, monkeypatch, tmp_path):
+        """Whitespace-only proxy becomes empty, not a crash-inducing string."""
+        assert self._load_with(monkeypatch, tmp_path, "   ") == []
 
-    def test_invalid_scheme_rejected(self):
+    def test_invalid_scheme_rejected(self, monkeypatch, tmp_path):
         """Unknown scheme (not http/https/socks5/socks5h) is rejected."""
-        import os, importlib
-        os.environ["HOUND_SEARCH_PROXY"] = "garbage://proxy"
-        import master_fetch.search_metasearch as m
-        importlib.reload(m)
-        try:
-            assert m._PROXY is None
-        finally:
-            os.environ.pop("HOUND_SEARCH_PROXY", None)
-            importlib.reload(m)
+        assert self._load_with(monkeypatch, tmp_path, "garbage://proxy") == []
 
-    def test_valid_socks5_accepted(self):
+    def test_valid_socks5_accepted(self, monkeypatch, tmp_path):
         """socks5 scheme is accepted (primp supports it natively)."""
-        import os, importlib
-        os.environ["HOUND_SEARCH_PROXY"] = "socks5://192.0.2.1:1080"
-        import master_fetch.search_metasearch as m
-        importlib.reload(m)
-        try:
-            assert m._PROXY == "socks5://192.0.2.1:1080"
-        finally:
-            os.environ.pop("HOUND_SEARCH_PROXY", None)
-            importlib.reload(m)
+        assert self._load_with(monkeypatch, tmp_path, "socks5://192.0.2.1:1080") == [
+            "socks5://192.0.2.1:1080"
+        ]
 
-    def test_no_proxy_env(self):
-        """Unset env var -> None (direct connection)."""
-        import os, importlib
-        os.environ.pop("HOUND_SEARCH_PROXY", None)
-        import master_fetch.search_metasearch as m
-        importlib.reload(m)
-        assert m._PROXY is None
+    def test_no_proxy_env(self, monkeypatch, tmp_path):
+        """Unset env var -> [] (direct connection)."""
+        assert self._load_with(monkeypatch, tmp_path, None) == []
+
+    def test_multiple_comma_separated(self, monkeypatch, tmp_path):
+        """Comma-separated env var yields a rotation pool."""
+        proxies = self._load_with(
+            monkeypatch, tmp_path, "http://p1:8080,http://p2:8080,http://p3:8080"
+        )
+        assert proxies == ["http://p1:8080", "http://p2:8080", "http://p3:8080"]
 
     def test_all_engines_construction_failure_raises(self):
         """If every engine fails to construct (bad deps, etc), raise an error

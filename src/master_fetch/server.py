@@ -3705,6 +3705,16 @@ def main():
                         help="reinstall the version from before the last update")
     parser.add_argument("--reinstall", action="store_true",
                         help="full reinstall with all deps + [all] extras")
+
+    proxy_parser = parser.add_subparsers(dest="proxy_cmd", help="manage search proxies for IP rotation")
+    proxy_cmd = proxy_parser.add_parser("proxy", help="manage search proxies for IP rotation")
+    proxy_sub = proxy_cmd.add_subparsers(dest="proxy_action", help="proxy sub-command")
+    proxy_add = proxy_sub.add_parser("add", help="add a proxy (format: http://ip:port or socks5://user:pass@ip:port)")
+    proxy_add.add_argument("proxies", nargs="+", help="one or more proxy URLs to add")
+    proxy_list = proxy_sub.add_parser("list", help="list configured proxies (redacted)")
+    proxy_remove = proxy_sub.add_parser("remove", help="remove a proxy by index")
+    proxy_remove.add_argument("index", type=int, help="proxy index (0-based, see 'hound proxy list')")
+    proxy_clear = proxy_sub.add_parser("clear", help="remove all proxies")
     args = parser.parse_args()
 
     # Sweep a stale launcher left by a previous `hound -u` (Windows only).
@@ -3724,6 +3734,59 @@ def main():
         return
     if args.version:
         updater.print_version()
+        return
+
+    if getattr(args, "proxy_action", None):
+        from master_fetch.search_proxy import (
+            add_proxy, list_proxies, remove_proxy, clear_proxies,
+            redact_proxy, load_proxies, MAX_PROXIES,
+        )
+        action = args.proxy_action
+        if action == "add":
+            added = 0
+            for proxy_url in args.proxies:
+                try:
+                    count = add_proxy(proxy_url)
+                    added += 1
+                    print(f"  {ui.ok('OK')} Added {redact_proxy(proxy_url)} ({count}/{MAX_PROXIES})")
+                except ValueError as e:
+                    print(f"  {ui.red('ERROR')} {e}")
+            if added:
+                print(f"  Config: ~/.hound/search_proxies.json")
+                print(f"  Rotation: each search uses the next proxy, cycling through all {count}.")
+            return
+        if action == "list":
+            # Show config file proxies + env var proxies (merged).
+            all_proxies = load_proxies()
+            if not all_proxies:
+                print(ui.dim("  No search proxies configured."))
+                print(ui.dim("  Add with: hound proxy add http://ip:port"))
+                print(ui.dim("  Format: http://ip:port, https://ip:port, socks5://ip:port"))
+                print(ui.dim("  With auth: http://user:pass@ip:port"))
+                return
+            print(ui.branded(ui.cyan("Search Proxy Pool"), ui.dim("~/.hound/search_proxies.json")))
+            for i, p in enumerate(all_proxies):
+                print(f"  [{i}] {redact_proxy(p)}")
+            print(f"")
+            print(ui.dim(f"  Rotation: each search call uses the next proxy, cycling through all {len(all_proxies)}."))
+            print(ui.dim(f"  Pool size: {len(all_proxies)}/{MAX_PROXIES}"))
+            return
+        if action == "remove":
+            try:
+                removed = remove_proxy(args.index)
+                print(f"  {ui.ok('OK')} Removed [{args.index}] {redact_proxy(removed)}")
+            except (IndexError, ValueError) as e:
+                print(f"  {ui.red('ERROR')} {e}")
+                return 1
+            return
+        if action == "clear":
+            removed = clear_proxies()
+            if removed:
+                print(f"  {ui.ok('OK')} Removed {removed} proxy(s)")
+            else:
+                print(ui.dim("  No proxies to remove."))
+            return
+        proxy_cmd.print_help()
         return
 
     # HTTP mode: stdout is free (not an MCP stdio pipe), so a one-line banner is
