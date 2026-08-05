@@ -487,3 +487,74 @@ class TestSearchProxyValidation:
             m._TEXT_ENGINES.clear()
             m._TEXT_ENGINES.update(original)
             m._BRIGHTDATA_API_KEY = original_bd_key
+
+
+# ─── Result diversity (upstream v12.0.0) ──────────────────────────
+
+class TestDiversify:
+
+    def _make_results(self, urls):
+        return ([RawResult(title=f"Title {i}", url=u, snippet="",
+                          source="brave", position=i) for i, u in enumerate(urls)],
+                [0.9 - i * 0.01 for i in range(len(urls))])
+
+    def test_same_domain_capped_at_two(self):
+        ranked, scores = self._make_results([
+            "https://medium.com/a",
+            "https://medium.com/b",
+            "https://medium.com/c",
+            "https://medium.com/d",
+        ])
+        r, s = search._diversify(ranked, scores, max_per_domain=2)
+        # First two medium.com kept in top, last two deferred to bottom
+        top_domains = [search._get_domain(r[i].url) for i in range(2)]
+        assert top_domains == ["medium.com", "medium.com"]
+        # Third position should NOT be medium.com (deferred)
+        assert search._get_domain(r[2].url) != "medium.com" or len(r) == 4
+        # Actually all 4 are medium.com so 2 kept + 2 deferred
+        assert len(r) == 4
+
+    def test_different_domains_not_affected(self):
+        ranked, scores = self._make_results([
+            "https://github.com/a",
+            "https://arxiv.org/b",
+            "https://medium.com/c",
+        ])
+        r, s = search._diversify(ranked, scores, max_per_domain=2)
+        assert [i.url for i in r] == [ranked[0].url, ranked[1].url, ranked[2].url]
+
+    def test_mixed_domains_partial_deferral(self):
+        ranked, scores = self._make_results([
+            "https://medium.com/a",
+            "https://medium.com/b",
+            "https://github.com/c",
+            "https://medium.com/d",  # 3rd medium.com → deferred
+        ])
+        r, s = search._diversify(ranked, scores, max_per_domain=2)
+        assert len(r) == 4
+        # First two are medium.com, third is github, fourth is deferred medium.com
+        assert search._get_domain(r[0].url) == "medium.com"
+        assert search._get_domain(r[1].url) == "medium.com"
+        assert search._get_domain(r[2].url) == "github.com"
+        assert search._get_domain(r[3].url) == "medium.com"
+
+    def test_empty_list(self):
+        r, s = search._diversify([], [], max_per_domain=2)
+        assert r == [] and s == []
+
+    def test_single_result(self):
+        ranked, scores = self._make_results(["https://example.com/a"])
+        r, s = search._diversify(ranked, scores, max_per_domain=2)
+        assert len(r) == 1
+
+    def test_www_prefix_stripped(self):
+        """www.medium.com and medium.com should be treated as same domain."""
+        ranked, scores = self._make_results([
+            "https://www.medium.com/a",
+            "https://medium.com/b",
+            "https://medium.com/c",
+        ])
+        r, s = search._diversify(ranked, scores, max_per_domain=2)
+        # First two kept (same domain after www strip), third deferred
+        assert search._get_domain(r[0].url) == "medium.com"
+        assert search._get_domain(r[1].url) == "medium.com"
