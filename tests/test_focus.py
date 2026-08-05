@@ -6,7 +6,9 @@ returns fallback blocks, heading context preserved.
 """
 
 import pytest
-from master_fetch.focus import focus_content, _split_blocks, _tokens, _is_heading
+from master_fetch.focus import (
+    focus_content, _split_blocks, _tokens, _is_heading, _is_table, _is_code,
+)
 
 
 class TestFocusContent:
@@ -127,3 +129,87 @@ class TestTokens:
 
     def test_empty_text(self):
         assert _tokens("") == []
+
+
+# ─── Heading-aware BM25 + table/code preservation (upstream v11.2.0) ──
+
+class TestHeadingAwareBM25:
+
+    def test_blocks_under_matching_heading_boosted(self):
+        text = """# Introduction
+
+This is an intro paragraph with no query terms.
+
+## Model Architecture
+
+The hidden dimension is critical for performance.
+Each layer processes the full representation.
+
+## Training Details
+
+We used Adam optimizer with learning rate scheduling."""
+
+        result = focus_content(text, "model architecture dimension")
+        assert "Model Architecture" in result
+
+    def test_heading_without_query_terms_not_boosted(self):
+        text = """## Training Details
+
+We used Adam optimizer with cosine annealing.
+
+## Model Architecture
+
+The architecture uses 96 transformer layers."""
+
+        result = focus_content(text, "training details optimizer")
+        assert "Adam optimizer" in result
+
+    def test_heading_level_hierarchy(self):
+        text = """## Architecture
+
+### Transformer Architecture
+
+The attention mechanism is key.
+
+### RNN Architecture
+
+Recurrent connections process sequences."""
+
+        result = focus_content(text, "architecture transformer attention")
+        assert "Transformer Architecture" in result
+        assert "attention mechanism" in result
+
+    def test_table_preservation(self):
+        text = """# Introduction
+
+Some intro text here.
+
+| Model | d_model | layers |
+|---|---|---|
+| GPT-3 | 12288 | 96 |
+
+## Other Section
+
+Unrelated content about training."""
+
+        result = focus_content(text, "GPT-3 d_model 12288")
+        assert "12288" in result
+        assert "|" in result  # table format preserved
+
+
+class TestTableCodeDetection:
+
+    def test_is_table_markdown(self):
+        assert _is_table("| A | B | C |\n|---|---|---|\n| 1 | 2 | 3 |") is True
+
+    def test_is_table_not_prose(self):
+        assert _is_table("This is a paragraph of text with no pipes.") is False
+
+    def test_is_code_fenced(self):
+        assert _is_code("```python\ndef foo():\n    pass\n```") is True
+
+    def test_is_code_indented(self):
+        assert _is_code("    def foo():\n        return 42\n    bar = foo()") is True
+
+    def test_is_code_not_prose(self):
+        assert _is_code("This is a normal paragraph.") is False

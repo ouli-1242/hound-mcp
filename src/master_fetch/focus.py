@@ -65,9 +65,16 @@ def _is_table(block: str) -> bool:
 
 
 def _is_code(block: str) -> bool:
-    """True if the block is a fenced code block."""
-    stripped = block.lstrip()
-    return stripped.startswith("```") or stripped.startswith("    ")
+    """Detect code blocks: fenced (```) or consistently indented."""
+    stripped = block.strip()
+    if stripped.startswith("```"):
+        return True
+    lines = block.splitlines()
+    non_blank = [l for l in lines if l.strip()]
+    if not non_blank or len(non_blank) < 2:
+        return False
+    indented = sum(1 for l in non_blank if l.startswith("    ") or l.startswith("\t"))
+    return indented >= len(non_blank) * 0.8
 
 
 def _split_blocks(text: str) -> list[str]:
