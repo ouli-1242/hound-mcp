@@ -840,6 +840,7 @@ async def metasearch(
     timelimit: Optional[str] = None,
     page: int = 1,
     engines: Optional[list[str]] = None,
+    query_map: Optional[dict[str, str]] = None,
 ) -> tuple[list[dict[str, str]], dict[str, str]]:
     """Run the backends in PARALLEL and return (results, per-backend-status).
 
@@ -897,9 +898,13 @@ async def metasearch(
         # interface throttles concurrent requests; a 0.3s delay avoids 429s).
         if name == "duckduckgo":
             await asyncio.sleep(0.3)
+        # Per-engine query: if a query_map is provided (multi-query fan-out),
+        # each engine searches its assigned variant. Falls back to the main
+        # query for engines not in the map (backward-compatible).
+        q = (query_map or {}).get(name, query)
         # engine.search is sync (blocking HTTP) -> offload to a thread.
         res = await asyncio.to_thread(
-            eng.search, query, region, safesearch, timelimit, page,
+            eng.search, q, region, safesearch, timelimit, page,
         )
         return name, (res or [])
 

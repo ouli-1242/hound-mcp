@@ -558,3 +558,102 @@ class TestDiversify:
         # First two kept (same domain after www strip), third deferred
         assert search._get_domain(r[0].url) == "medium.com"
         assert search._get_domain(r[1].url) == "medium.com"
+
+
+# ─── Intent-aware fan-out (upstream v12.0.0) ──────────────────────
+
+class TestQueryMapIntegration:
+
+    def test_research_query_generates_different_queries(self):
+        engines = ["duckduckgo", "brave", "mojeek", "yahoo",
+                    "yandex", "startpage", "google", "qwant"]
+        intent = search._detect_intent("transformer attention mechanism research")
+        assert intent == "research"
+        qm = search._generate_query_map("transformer attention mechanism research", intent, engines)
+        assert qm != {}
+        assert qm["duckduckgo"] == "transformer attention mechanism research"
+        assert qm["yandex"] != "transformer attention mechanism research"
+        assert "paper" in qm["yandex"] or "arxiv" in qm["yandex"]
+
+    def test_comparison_query_no_fan_out(self):
+        engines = ["duckduckgo", "brave", "yandex"]
+        intent = search._detect_intent("Python vs Rust performance comparison")
+        assert intent == "comparison"
+        qm = search._generate_query_map("Python vs Rust performance comparison", intent, engines)
+        assert qm == {}
+
+    def test_general_query_no_fan_out(self):
+        engines = ["duckduckgo", "brave", "yandex"]
+        intent = search._detect_intent("best restaurants in paris")
+        qm = search._generate_query_map("best restaurants in paris", intent, engines)
+        assert qm == {}
+
+    def test_factual_query_fan_out(self):
+        engines = ["duckduckgo", "yandex"]
+        intent = search._detect_intent("GPT-3 embedding dimension d_model parameters")
+        assert intent == "factual"
+        qm = search._generate_query_map("GPT-3 embedding dimension d_model parameters", intent, engines)
+        assert qm != {}
+        assert "specifications" in qm["yandex"]
+        assert "table" in qm["yandex"]
+
+
+class TestIntentFalsePositives:
+    """Ambiguous standalone words should NOT trigger wrong intents."""
+
+    def test_area_code_not_code(self):
+        assert search._detect_intent("area code 212") != "code"
+
+    def test_toilet_paper_not_research(self):
+        assert search._detect_intent("toilet paper brands") != "research"
+
+    def test_database_update_not_news(self):
+        assert search._detect_intent("database update syntax") != "news"
+
+    def test_make_a_difference_not_comparison(self):
+        assert search._detect_intent("make a difference quotes") != "comparison"
+
+    def test_alternative_music_not_comparison(self):
+        assert search._detect_intent("alternative music genres") != "comparison"
+
+    def test_dining_table_not_factual(self):
+        assert search._detect_intent("dining table wood") != "factual"
+
+    def test_general_query_no_expansion(self):
+        assert search._expand_query("best restaurants in paris", "general") == "best restaurants in paris"
+
+
+class TestFactualDetectionExpanded:
+
+    def test_architecture_layers_heads_factual(self):
+        assert search._detect_intent("GPT-3 architecture layers heads") == "factual"
+
+    def test_context_window_factual(self):
+        assert search._detect_intent("transformer model context window") == "factual"
+
+    def test_throughput_latency_factual(self):
+        assert search._detect_intent("LLM inference throughput latency") == "factual"
+
+    def test_non_technical_with_data_word_not_factual(self):
+        assert search._detect_intent("shoe size guide") != "factual"
+
+
+class TestQueryLengthLimit:
+
+    def test_long_query_no_expansion(self):
+        long_q = " ".join(["word"] * 15)
+        assert search._expand_query(long_q, "code") == long_q
+
+    def test_short_query_still_expanded(self):
+        short_q = "attention mechanism"
+        assert search._expand_query(short_q, "research") != short_q
+
+    def test_exactly_14_words_expanded(self):
+        q = " ".join(["attention"] + ["word"] * 13)
+        assert search._expand_query(q, "research") != q
+
+
+class TestNewsYearDynamic:
+
+    def test_news_no_expansion(self):
+        assert search._expand_query("latest AI announcement", "news") == "latest AI announcement"

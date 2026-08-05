@@ -178,6 +178,7 @@ async def multi_search(
     freshness: Optional[str] = None,
     page: int = 0,
     server=None,  # accepted for signature compat; search is 100% HTTP (no browser)
+    query_map: Optional[dict[str, str]] = None,
 ) -> tuple[list[RawResult], list[EngineReport]]:
     """Run the keyless metasearch backends in parallel; return (ranked, reports).
 
@@ -189,11 +190,17 @@ async def multi_search(
     search never touches the browser).
     """
     # Build the query with site:/-site: prefixes (best-effort upstream filter).
-    q = query
-    if site:
-        q = f"site:{site} {q}"
-    for ex in exclude_sites or []:
-        q = f"-site:{ex} {q}"
+    def _apply_site(q: str) -> str:
+        if site:
+            q = f"site:{site} {q}"
+        for ex in exclude_sites or []:
+            q = f"-site:{ex} {q}"
+        return q
+
+    q = _apply_site(query)
+    # Apply site: filters to each per-engine query in the query_map (fan-out).
+    if query_map:
+        query_map = {eng: _apply_site(qq) for eng, qq in query_map.items()}
     timelimit = _FRESHNESS_TO_TIMELIMIT.get(freshness) if freshness else None
     backend_page = page + 1  # hound 0-indexed -> backends 1-indexed
 
@@ -203,7 +210,7 @@ async def multi_search(
     metasearch = _get_metasearch()
     results_dicts, status = await metasearch(
         q, max_results, region=region, timelimit=timelimit,
-        page=backend_page, engines=mapped,
+        page=backend_page, engines=mapped, query_map=query_map,
     )
 
     # Map to RawResult with cross-backend consensus + apply the final site filter.

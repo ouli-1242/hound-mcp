@@ -23,6 +23,7 @@ import logging
 import os
 import re
 from collections import Counter
+from datetime import datetime
 from time import time
 from typing import Optional
 from urllib.parse import urlparse
@@ -704,6 +705,104 @@ def _url_relevance(query: str, url: str) -> float:
     return min(hits / len(q_terms), 1.0) * 0.08 if hits else 0.0
 
 
+# ─── intent-aware multi-query fan-out (upstream v12.0.0) ────────────────
+# Detect query intent and give the diversity engines (Yandex, Startpage, Google,
+# Qwant) an expanded query variant while core engines keep the original. Same
+# request count, zero added latency (all parallel), but higher recall because
+# different query variants surface different pages. Cross-variant consensus: a URL
+# surfaced by different queries from different engines is a STRONGER authority
+# signal than one from a single query.
+
+_INTENT_PATTERNS: list[tuple[str, re.Pattern]] = [
+    # Ambiguous standalone words removed ("code" → "area code", etc). False
+    # negatives are cheap (no expansion); false positives are expensive (dilute
+    # diversity engines with irrelevant expansion terms).
+    ("comparison", re.compile(r"\b(?:vs\.?|versus|compare|comparison|difference\s+between|pros\s+and\s+cons|which\s+is\s+better)\b", re.I)),
+    ("howto", re.compile(r"\b(?:how\s+to|how\s+do\s+i|guide|tutorial|step\s+by\s+step|walkthrough)\b", re.I)),
+    ("research", re.compile(r"\b(?:arxiv|research|benchmark|literature|state\s+of\s+the\s+art|case\s+study|white\s+paper)\b", re.I)),
+    ("code", re.compile(r"\b(?:implement|function|api|method|class|snippet|script|debug|error|exception|source\s+code|code\s+example)\b", re.I)),
+    ("reference", re.compile(r"\b(?:what\s+is|definition|explain|meaning|overview|introduction|understand)\b", re.I)),
+    ("news", re.compile(r"\b(?:latest|newest|recent|announcement|breaking|changelog|release\s+notes|new\s+release|just\s+released)\b", re.I)),
+]
+
+_INTENT_EXPANSIONS: dict[str, str] = {
+    "research": " paper arxiv benchmark results",
+    "factual": " specifications table data parameters",
+    # Other intents do NOT get expansion (testing showed expanded terms returned
+    # tutorial spam instead of primary sources).
+    "comparison": "",
+    "howto": "",
+    "code": "",
+    "reference": "",
+    "news": "",
+    "general": "",
+}
+
+# Data/spec signal words for factual intent (catch queries asking for concrete
+# numbers/config, not just general tech discussion).
+_FACTUAL_DATA_WORDS = frozenset({
+    "dimension", "size", "parameters", "count", "value", "spec",
+    "specification", "d_model", "architecture", "layer",
+    "config", "hidden", "precision", "vocab", "vocabulary",
+    "encoder", "decoder", "context", "window", "throughput",
+    "latency", "memory", "token", "batch", "sequence", "flops",
+    "compute", "gpu", "head", "heads", "embedding", "optimizer",
+})
+
+
+def _detect_intent(query: str) -> str:
+    """Detect query intent for multi-query fan-out. Returns one of:
+    comparison, howto, research, code, reference, news, factual, general.
+    Rule-based pattern matching (no LLM). Priority: comparison > howto > research
+    > code > reference > news > factual > general."""
+    q_lower = query.lower()
+    for intent, pattern in _INTENT_PATTERNS:
+        if pattern.search(q_lower):
+            return intent
+    if _is_technical_query(query) and any(w in q_lower for w in _FACTUAL_DATA_WORDS):
+        return "factual"
+    return "general"
+
+
+def _expand_query(query: str, intent: str) -> str:
+    """Generate an expanded query variant by appending intent-specific terms.
+    Only appends terms NOT already in the query. Returns the original query
+    unchanged if no expansion applies (general intent, all terms present, or
+    query too long)."""
+    expansion = _INTENT_EXPANSIONS.get(intent, "")
+    if not expansion:
+        return query
+    # Don't expand very long queries — could exceed engine query-length limits.
+    if len(query.split()) >= 15:
+        return query
+    if intent == "news":
+        expansion = expansion.replace("{year}", str(datetime.now().year))
+    q_lower = query.lower()
+    new_terms = [t for t in expansion.split() if t.lower() not in q_lower]
+    if not new_terms:
+        return query
+    return query + " " + " ".join(new_terms)
+
+
+def _generate_query_map(query: str, intent: str, engines: list[str] | None) -> dict[str, str]:
+    """Assign per-engine query variants for multi-query fan-out.
+
+    Core engines (DDG, Brave, Mojeek, Yahoo) get the original query; diversity
+    engines (Yandex, Startpage, Google, Qwant) get the expanded query. Returns {}
+    if no expansion applies (all engines get the same query = backward-compatible).
+    """
+    expanded = _expand_query(query, intent)
+    if expanded == query:
+        return {}
+    core = {"duckduckgo", "brave", "mojeek", "yahoo"}
+    engs = engines or []
+    query_map: dict[str, str] = {}
+    for eng in engs:
+        # Map hound engine name to its backend name before matching.
+        query_map[eng] = query if eng in core else expanded
+    return query_map
+
+
 def _apply_quality_boost(ranked: list, scores: list[float], query: str
                          ) -> tuple[list, list[float]]:
     """Six-signal composite boost: consensus + domain + answer + title + URL.
@@ -905,11 +1004,17 @@ async def smart_search(
             fetch_hint = (fetch_hint + " | " + rerank_note) if fetch_hint else rerank_note
         sim_related = _related_queries(derived_query, results_list)
     else:
+        # Intent-aware multi-query fan-out (upstream v12.0.0): detect intent
+        # and give diversity engines an expanded query variant while core engines
+        # keep the original. Same request count, zero added latency, higher recall.
+        _intent = _detect_intent(query)
+        _fan_engines = list(engines) if engines is not None else list(DEFAULT_ENGINES)
+        _qmap = _generate_query_map(query, _intent, _fan_engines)
         try:
             ranked, reports = await multi_search(
                 query, max_results, engines=engines, site=site,
                 exclude_sites=exclude_sites, region=region, freshness=freshness,
-                page=page, server=server,
+                page=page, server=server, query_map=_qmap if _qmap else None,
             )
         except Exception as e:
             error = redact_api_key(str(e)[:200])
