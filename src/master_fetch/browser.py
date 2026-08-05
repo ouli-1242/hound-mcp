@@ -1092,10 +1092,16 @@ class BrowserSession:
     ) -> "Any":
         """Navigate to a URL and return a Response object.
 
-        Parameters override session defaults for this request only.
+        Parameters override session defaults for this request only. Proxy is
+        fixed at session startup and cannot be changed here.
         """
         if not self._is_alive:
             raise RuntimeError("Session not started")
+        if proxy is not None and proxy != self._proxy:
+            raise ValueError(
+                "Proxy is fixed when a browser session starts; "
+                "open a new session to use a different proxy"
+            )
 
         # Resolve per-request overrides
         actual_wait = wait if wait is not None else self._wait
