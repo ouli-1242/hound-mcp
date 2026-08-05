@@ -1,6 +1,6 @@
 [project]
 name = "hound-mcp"
-version = "11.1.8"
+version = "99.0.0"
 description = "Web research for AI agents. Fetch any page with anti-bot bypass plus web search. $0 forever. No scrapling dependency: hound uses primp + patchright directly. Graceful degradation when browser deps are unavailable (HTTP-only mode on Termux/Android). Token-optimized tool definitions, polished cross-platform CLI, brick-proof self-update with hound doctor + rollback."
 readme = "README.md"
 authors = [{name = "Bishesh Bhandari", email = "bishesh@master-fetch.dev"}]
@@ -18,7 +18,7 @@ dependencies = [
     "aiosqlite>=0.20.0",
     # metasearch backends (vendored ddgs engine layer, MIT) - keyless search:
     "primp>=1.0",
-    "httpx[http2]>=0.27",
+    "httpx[http2,socks]>=0.27",
     "fake-useragent>=2.0",
     "lxml>=5.0",
     "cssselect>=1.2",
@@ -60,6 +60,9 @@ all = [
     "rapidocr>=3.0",
     "onnxruntime>=1.16",
     "tokenizers>=0.20",
+    # Local file parsing (parse tool):
+    "python-docx>=1.0",
+    "openpyxl>=3.1",
 ]
 
 [project.urls]

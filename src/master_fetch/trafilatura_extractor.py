@@ -66,14 +66,43 @@ def _extract_html_title(html: str) -> str:
 
 def _trafilatura_markdown(html: str, url: str = "") -> str | None:
     """Best-effort markdown extraction using trafilatura.extract().
-    This uses different heuristics than bare_extraction and often succeeds
-    where bare_extraction fails.
+
+    Strategy: trafilatura identifies main content (filtering nav/ads), then
+    markdownify converts to markdown preserving [text](url) links. This hybrid
+    gives trafilatura's content quality + markdownify's link preservation.
     """
-    return trafilatura.extract(
+    # First: try trafilatura's native markdown (fast, good content filtering)
+    result = trafilatura.extract(
         html, url=url,
         include_comments=False, include_tables=True,
+        include_links=True,
         output_format="markdown",
     )
+    # If trafilatura produced content WITH links, use it directly
+    if result and "](" in result:
+        return result
+    # If trafilatura produced content but WITHOUT links, try markdownify
+    # on the main content region to preserve link references.
+    if result:
+        try:
+            from markdownify import markdownify as _md
+            import re as _re
+            # Strip nav/header/footer/aside/script/style before markdownify
+            # to avoid navigation link noise.
+            _strip_re = _re.compile(
+                r'<(nav|header|footer|aside|script|style|noscript)\b[^>]*>.*?</\1>',
+                _re.IGNORECASE | _re.DOTALL,
+            )
+            cleaned = _strip_re.sub('', html)
+            md_with_links = _md(cleaned, heading_style="ATX", strip=['img'])
+            # Only use markdownify version if it has links and isn't too bloated
+            # (max 3x the trafilatura text length to avoid nav noise).
+            if "](" in md_with_links and len(md_with_links) < len(result) * 3:
+                return md_with_links.strip()
+        except Exception:
+            pass
+        return result
+    return None
 
 
 def _trafilatura_article(html: str, url: str = "") -> dict | None:

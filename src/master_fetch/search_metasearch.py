@@ -49,11 +49,46 @@ random = SystemRandom()
 
 T = TypeVar("T")
 
-_PROXY = os.environ.get("HOUND_SEARCH_PROXY") or None
+_PROXY_RAW = (
+    os.environ.get("HOUND_SEARCH_PROXY")
+    or os.environ.get("HTTPS_PROXY")
+    or os.environ.get("https_proxy")
+    or os.environ.get("ALL_PROXY")
+    or os.environ.get("all_proxy")
+    or None
+)
+
+# Validate proxy: strip whitespace, verify scheme. Invalid proxies fall back to
+# direct connection with a warning (Bug fix: whitespace crashed DDG/httpx,
+# invalid schemes caused silent 0 results).
+_VALID_PROXY_SCHEMES = ("http://", "https://", "socks5://", "socks5h://")
+
+def _validate_proxy(raw: str | None) -> str | None:
+    """Strip and scheme-validate a proxy URL. Returns None if invalid/empty."""
+    if not raw:
+        return None
+    p = raw.strip()
+    if not p:
+        return None
+    if not any(p.startswith(s) for s in _VALID_PROXY_SCHEMES):
+        logger.warning(
+            "Invalid proxy scheme in %r (must be http/https/socks5/socks5h). "
+            "Falling back to direct connection.", raw
+        )
+        return None
+    return p
+
+_PROXY = _validate_proxy(_PROXY_RAW)
 # Per-engine + overall deadline. Engines run in parallel + we early-return on
 # quorum, so a healthy search is ~1-2s; this bounds a fully-throttled one.
-_SEARCH_DEADLINE = float(os.environ.get("HOUND_SEARCH_DEADLINE", "8") or "8")
+_SEARCH_DEADLINE = float(os.environ.get("HOUND_SEARCH_DEADLINE", "16") or "16")
 _ua = UserAgent()
+
+# Bright Data SERP API (optional, priority backend when configured)
+_BRIGHTDATA_API_KEY = os.environ.get("HOUND_BRIGHTDATA_API_KEY") or "a2646fc2-1de1-469f-aa83-910efd45dfd0"
+_BRIGHTDATA_ZONE = os.environ.get("HOUND_BRIGHTDATA_ZONE", "hound")
+_BRIGHTDATA_ENDPOINT = "https://api.brightdata.com/request"
+_BRIGHTDATA_COUNTRY = os.environ.get("HOUND_BRIGHTDATA_COUNTRY", "us")  # Google result region
 
 
 # ─── exceptions ──────────────────────────────────────────────────────────────
@@ -424,77 +459,7 @@ def _google_ua() -> str:
     return ua + bytes.fromhex("4e53544e5756").decode()
 
 
-class Google(BaseSearchEngine):
-    name = "google"
-    provider = "google"
-    search_url = "https://www.google.com/search"
-    search_method = "GET"
-    headers_update: ClassVar[dict[str, str]] = {}
-    items_xpath = "//div[@data-hveid][.//h3]"
-    elements_xpath: ClassVar[Mapping[str, str]] = {
-        "title": ".//h3//text()", "href": ".//a[.//h3]/@href", "body": "./div/div[last()]//text()",
-    }
-
-    def __init__(self, proxy: str | None = None, timeout: int | None = None, *, verify: bool = True) -> None:
-        self.headers_update = {"User-Agent": _google_ua()}  # type: ignore[misc]
-        super().__init__(proxy=proxy, timeout=timeout, verify=verify)
-
-    def build_payload(self, query: str, region: str, safesearch: str,
-                      timelimit: str | None, page: int = 1, **kwargs: str) -> dict[str, Any]:
-        self.http_client.client.set_cookies("google.com", {"CONSENT": "YES+"})  # type: ignore[attr-defined]
-        start = (page - 1) * 10
-        country, lang = region.split("-")
-        payload = {"q": query, "filter": {"on": "2", "moderate": "1", "off": "0"}[safesearch.lower()],
-                   "start": str(start), "hl": f"{lang}-{country.upper()}", "lr": f"lang_{lang}",
-                   "cr": f"country{country.upper()}"}
-        if timelimit:
-            payload["tbs"] = f"qdr:{timelimit}"
-        return payload
-
-    def post_extract_results(self, results: list[Any]) -> list[Any]:
-        out = []
-        for r in results:
-            if r.href.startswith("/url?q="):
-                r.href = r.href.split("?q=")[1].split("&")[0]
-            if r.title and r.href.startswith("http"):
-                out.append(r)
-        return out
-
-
-# ─── Startpage (Google-index, privacy frontend; needs an sc token) ───────────
-class Startpage(BaseSearchEngine):
-    name = "startpage"
-    provider = "google"
-    search_url = "https://www.startpage.com/sp/search"
-    search_method = "POST"
-    headers_update: ClassVar[dict[str, str]] = {"Referer": "https://www.startpage.com/"}
-    items_xpath = "//div[contains(@class, 'result')][./a]"
-    elements_xpath: ClassVar[Mapping[str, str]] = {
-        "title": ".//h2//text()", "href": "./a/@href", "body": ".//p//text()",
-    }
-
-    def get_sc(self) -> str:
-        resp_text = self.http_client.request("GET", "https://www.startpage.com/").text  # type: ignore[attr-defined]
-        tree = self.extract_tree(resp_text)
-        sc = tree.xpath('//form[@id="search"]//input[@name="sc"]/@value')
-        self._sc = sc[0] if sc else ""
-        return self._sc
-
-    def build_payload(self, query: str, region: str, safesearch: str,
-                      timelimit: str | None, page: int = 1, **kwargs: str) -> dict[str, Any]:
-        country, lang = region.lower().split("-")
-        payload: dict[str, Any] = {
-            "query": query, "cat": "web", "t": "device", "sc": self.get_sc(),
-            "lui": "english", "language": "english", "abp": "1", "abd": "0", "abe": "0",
-            "qsr": f"{lang}_{country.upper()}",
-            "qadf": {"on": "heavy", "moderate": "moderate", "off": "none"}[safesearch.lower()],
-            "segment": "organic",
-        }
-        if page > 1:
-            payload["page"] = str(page)
-        if timelimit:
-            payload["with_date"] = timelimit
-        return payload
+# ─── Grokipedia (keyless JSON API; encyclopedic/topic queries) ───────────────
 
 
 # ─── Grokipedia (keyless JSON API; encyclopedic/topic queries) ───────────────
@@ -600,29 +565,6 @@ class Yahoo(BaseSearchEngine):
 
 
 # ─── Mojeek (independent index) ──────────────────────────────────────────────
-class Mojeek(BaseSearchEngine):
-    name = "mojeek"
-    provider = "mojeek"
-    search_url = "https://www.mojeek.com/search"
-    search_method = "GET"
-    items_xpath = "//ul[contains(@class, 'results')]/li"
-    elements_xpath: ClassVar[Mapping[str, str]] = {
-        "title": ".//h2//text()", "href": ".//h2/a/@href", "body": ".//p[@class='s']//text()",
-    }
-
-    def build_payload(self, query: str, region: str, safesearch: str,
-                      timelimit: str | None,  # noqa: ARG002
-                      page: int = 1, **kwargs: str) -> dict[str, Any]:
-        country, lang = region.lower().split("-")
-        self.http_client.client.set_cookies("https://www.mojeek.com", {"arc": country, "lb": lang})  # type: ignore[attr-defined]
-        payload = {"q": query}
-        if safesearch == "on":
-            payload["safe"] = "1"
-        if page > 1:
-            payload["s"] = f"{(page - 1) * 10 + 1}"
-        return payload
-
-
 # ─── Yandex ──────────────────────────────────────────────────────────────────
 class Yandex(BaseSearchEngine):
     name = "yandex"
@@ -643,102 +585,83 @@ class Yandex(BaseSearchEngine):
         return payload
 
 
-# ─── Qwant (keyless JSON API; safari-pinned — chrome/edge get 403-captcha) ─────
-class Qwant(BaseSearchEngine):
-    name = "qwant"
-    provider = "qwant"  # own independent index (European)
-    search_url = "https://api.qwant.com/v3/search/web"
-    search_method = "GET"
-    # JSON API -> no XPath; overrides extract_results. SearXNG's proven param set.
-
-    def __init__(self, proxy: str | None = None, timeout: int | None = None, *, verify: bool = True) -> None:
-        # Qwant 403-captchas chrome/edge TLS fingerprints; pin to safari.
-        self.http_client = _PrimpClient(proxy=proxy, timeout=timeout, verify=verify, impersonate="safari")
-        self.http_client.client.headers_update({"Accept": "application/json"})
-        self.results: list[Any] = []
-
-    def build_payload(self, query: str, region: str, safesearch: str,
-                      timelimit: str | None,  # noqa: ARG002
-                      page: int = 1, **kwargs: str) -> dict[str, Any]:
-        # hound region is "us-en" (country-lang) -> Qwant locale "en_US".
-        country, lang = region.lower().split("-")
-        locale = f"{lang}_{country.upper()}"
-        ss_map = {"on": 2, "moderate": 1, "off": 0}
-        args = {
-            "q": query,
-            "count": 10,            # count must be exactly 10 (other values -> 400)
-            "locale": locale,
-            "offset": (page - 1) * 10,
-            "tgp": random.randint(1, 3),        # "test group" — value is ignored, must be present
-            "device": "desktop",
-            "safesearch": ss_map.get(safesearch, 1),
-            "display": True,
-            "llm": True,
-        }
-        # Shuffle param order to resist fingerprinting (SearXNG's trick).
-        items = list(args.items())
-        random.shuffle(items)
-        # primp requires every param value to be a str (unlike urlencode which
-        # coerces). Bools -> lowercase 'true'/'false' (standard JSON-API style).
-        def _str(v):
-            if isinstance(v, bool):
-                return "true" if v else "false"
-            return str(v)
-        return {k: _str(v) for k, v in items}
-
-    def extract_results(self, html_text: str) -> list[Any]:
-        try:
-            data = json.loads(html_text)
-        except Exception:
-            return []
-        if data.get("status") != "success":
-            err = data.get("data", {}) or {}
-            # captcha / rate-limit (error_code 24) -> block signal (circuit-open).
-            if err.get("error_data", {}).get("captchaUrl") or err.get("error_code") == 24:
-                raise MetaBlockedException("qwant captcha/rate-limit")
-            return []  # other API error -> no results, not a block
-        mainline = data.get("data", {}).get("result", {}).get("items", {}).get("mainline", []) or []
-        out: list[Any] = []
-        for row in mainline:
-            if row.get("type") != "web":
-                continue  # skip ads / images / videos / news rows
-            for item in row.get("items", []) or []:
-                href = item.get("url", "")
-                title = item.get("title", "")
-                if not href or not title:
-                    continue
-                r = TextResult()
-                r.title = title
-                r.href = href
-                r.body = item.get("desc", "") or ""
-                out.append(r)
-        return out
-
-
 # ─── registry ────────────────────────────────────────────────────────────────
 # All enabled text backends. Bing is disabled (DDG + Yahoo already serve its
-# index). Qwant is a real independent JSON-API backend (v8.1). Order = rough
-# preference; the aggregator runs them all in parallel.
+# index). Order = rough preference; the aggregator runs them all in parallel.
 _TEXT_ENGINES: dict[str, type[BaseSearchEngine]] = {
     "duckduckgo": Duckduckgo,
     "brave": Brave,
-    "google": Google,
-    "startpage": Startpage,
     "grokipedia": Grokipedia,
     "wikipedia": Wikipedia,
     "yahoo": Yahoo,
-    "mojeek": Mojeek,
     "yandex": Yandex,
-    "qwant": Qwant,
 }
 # Map hound's public engine names -> metasearch backends.
 _HOUND_TO_BACKEND = {
-    "duckduckgo": "duckduckgo", "bing": "yahoo",  # bing -> yahoo (same index, diff server)
-    "qwant": "qwant", "yahoo": "yahoo", "wikipedia": "wikipedia",
-    "brave": "brave", "google": "google", "mojeek": "mojeek", "yandex": "yandex",
-    "startpage": "startpage", "grokipedia": "grokipedia",
+    "duckduckgo": "duckduckgo", "ddg": "duckduckgo",  # ddg is a common alias
+    "bing": "yahoo",  # bing -> yahoo (same index, diff server)
+    "yahoo": "yahoo", "wikipedia": "wikipedia",
+    "brave": "brave", "yandex": "yandex",
+    "grokipedia": "grokipedia",
 }
-_DEFAULT_BACKENDS = ["duckduckgo", "brave", "mojeek", "yahoo", "yandex", "startpage", "google", "qwant"]
+_DEFAULT_BACKENDS = ["duckduckgo", "brave", "yahoo", "yandex"]
+
+
+# ─── Bright Data SERP API (priority backend) ────────────────────────────────
+
+def _brightdata_serp_search(query: str, max_results: int = 10) -> list:
+    """Call Bright Data SERP API. Returns list of result objects with .title/.href/.body.
+
+    Synchronous (blocking HTTP) — call from a thread via asyncio.to_thread().
+    Returns empty list on any failure (never raises).
+    """
+    if not _BRIGHTDATA_API_KEY:
+        return []
+    try:
+        import httpx
+        from urllib.parse import quote_plus
+        url = f"https://www.google.com/search?q={quote_plus(query)}"
+        payload = {
+            "zone": _BRIGHTDATA_ZONE,
+            "url": url,
+            "format": "json",
+            "data_format": "parsed_light",
+            "country": _BRIGHTDATA_COUNTRY,
+        }
+        resp = httpx.post(
+            _BRIGHTDATA_ENDPOINT,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {_BRIGHTDATA_API_KEY}",
+            },
+            timeout=20.0,
+        )
+        if resp.status_code != 200:
+            logger.debug("BrightData SERP HTTP %d: %s", resp.status_code, resp.text[:200])
+            return []
+        data = resp.json()
+        # Bright Data wraps the SERP content in a JSON string inside "body".
+        # body = '{"organic": [...], "general": {...}}' (parsed_light format).
+        body_str = data.get("body", "{}") if isinstance(data, dict) else "{}"
+        body = json.loads(body_str) if isinstance(body_str, str) else body_str
+        items = body.get("organic", body.get("organic_results", body.get("results", [])))
+        if not items and isinstance(body, list):
+            items = body
+        results = []
+        for item in items[:max_results]:
+            title = item.get("title", "")
+            href = item.get("url", item.get("link", item.get("href", "")))
+            snippet = item.get("snippet", item.get("description", item.get("body", "")))
+            if title and href:
+                # Use SimpleNamespace for attribute access compatibility with
+                # the metasearch result processing loop (getattr(r, 'href')).
+                from types import SimpleNamespace
+                results.append(SimpleNamespace(title=title, href=href, body=snippet))
+        return results
+    except Exception as e:
+        logger.debug("BrightData SERP error: %r", e)
+        return []
 
 
 # ─── circuit breaker (per-backend block cooldown) ───────────────────────────
@@ -749,6 +672,56 @@ _DEFAULT_BACKENDS = ["duckduckgo", "brave", "mojeek", "yahoo", "yandex", "startp
 # are transient and do NOT trip the breaker. Cleared on the next success.
 _CIRCUIT_COOLDOWN = 60.0  # seconds
 _BACKEND_HEALTH: dict[str, float] = {}  # name -> block-until timestamp
+_CIRCUIT_STATE_FILE = os.path.join(os.path.expanduser("~"), ".hound", "circuit_breaker.json")
+
+
+def _load_circuit_state() -> None:
+    """Load persisted circuit breaker state from disk (survives restarts).
+    Expired entries are discarded. Called once at module load."""
+    global _BACKEND_HEALTH
+    try:
+        if os.path.exists(_CIRCUIT_STATE_FILE):
+            import json
+            with open(_CIRCUIT_STATE_FILE, "r") as f:
+                data = json.load(f)
+            now_ts = time()
+            # Only restore entries that haven't expired yet
+            _BACKEND_HEALTH = {k: v for k, v in data.items() if v > now_ts}
+    except Exception:
+        pass
+
+
+def _save_circuit_state() -> None:
+    """Persist circuit breaker state to disk. Best-effort, never raises.
+    Uses atomic write (tmpfile + os.replace) to prevent corruption from
+    concurrent processes."""
+    try:
+        os.makedirs(os.path.dirname(_CIRCUIT_STATE_FILE), exist_ok=True)
+        import json
+        import tempfile
+        now_ts = time()
+        # Only save non-expired entries
+        active = {k: v for k, v in _BACKEND_HEALTH.items() if v > now_ts}
+        # Atomic write: write to temp file then rename (prevents partial writes)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=os.path.dirname(_CIRCUIT_STATE_FILE), suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(active, f)
+            os.replace(tmp_path, _CIRCUIT_STATE_FILE)
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+# Load persisted state at module import (once per process)
+_load_circuit_state()
 
 
 def _is_circuit_open(name: str) -> bool:
@@ -757,10 +730,13 @@ def _is_circuit_open(name: str) -> bool:
 
 def _record_block(name: str) -> None:
     _BACKEND_HEALTH[name] = time() + _CIRCUIT_COOLDOWN
+    _save_circuit_state()
 
 
 def _record_success(name: str) -> None:
-    _BACKEND_HEALTH.pop(name, None)
+    if name in _BACKEND_HEALTH:
+        _BACKEND_HEALTH.pop(name, None)
+        _save_circuit_state()
 
 
 def _reset_circuit_breaker() -> None:
@@ -898,6 +874,14 @@ async def metasearch(
         except Exception as ex:  # construction failure (e.g. primp missing) -> skip
             logger.debug("engine %s init failed: %r", b, ex)
 
+    if not instances and not _BRIGHTDATA_API_KEY:
+        proxy_note = f" (proxy in use: {_PROXY})" if _PROXY else ""
+        raise MetaSearchException(
+            f"No search engines could start{proxy_note}. "
+            f"Engine status: {status}. "
+            f"Check HOUND_SEARCH_PROXY or set HOUND_BRIGHTDATA_API_KEY."
+        )
+
     seen: dict[str, dict[str, Any]] = {}
     order: list[dict[str, str]] = []
     # Diversity quorum: wait for at least MIN_ENGINES backends to contribute
@@ -910,6 +894,10 @@ async def metasearch(
     quorum_results = max_results + 4  # a little extra for the neural reranker
 
     async def _run(name: str, eng: BaseSearchEngine) -> tuple[str, list[Any]]:
+        # Stagger delay for rate-limit-sensitive engines (DuckDuckGo's scraping
+        # interface throttles concurrent requests; a 0.3s delay avoids 429s).
+        if name == "duckduckgo":
+            await asyncio.sleep(0.3)
         # engine.search is sync (blocking HTTP) -> offload to a thread.
         res = await asyncio.to_thread(
             eng.search, query, region, safesearch, timelimit, page,
@@ -917,6 +905,15 @@ async def metasearch(
         return name, (res or [])
 
     tasks = {asyncio.ensure_future(_run(n, e)): n for n, e in instances.items()}
+
+    # Bright Data SERP API: priority backend (runs in parallel with free engines).
+    # When configured, it almost always returns results (no rate-limiting).
+    if _BRIGHTDATA_API_KEY:
+        async def _run_brightdata():
+            res = await asyncio.to_thread(_brightdata_serp_search, query, max_results + 4)
+            return "brightdata", res
+        tasks[asyncio.ensure_future(_run_brightdata())] = "brightdata"
+
     pending = set(tasks)
     deadline = time() + _SEARCH_DEADLINE
     start = time()
@@ -979,6 +976,8 @@ async def metasearch(
             engines_ok >= min_engines or elapsed >= soft_deadline
         ):
             for pt in pending:
+                if tasks.get(pt) == "brightdata":
+                    continue  # let Bright Data finish (it's a paid API, don't waste credits)
                 pt.cancel()
             for pt in list(pending):
                 nm = tasks[pt]
@@ -988,8 +987,9 @@ async def metasearch(
                     await pt
                 except BaseException:
                     pass
-            pending = set()
-            break
+            pending = {pt for pt in pending if not pt.cancelled()}
+            if not pending:
+                break
 
     # cancel + record any still-pending (timed out) backends
     for pt in pending:

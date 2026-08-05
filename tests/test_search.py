@@ -312,19 +312,17 @@ class TestMultiSearchMapping:
 
 class TestEngineConfig:
 
-    def test_default_engines_has_eight(self):
-        assert len(DEFAULT_ENGINES) == 8
+    def test_default_engines_has_four(self):
+        assert len(DEFAULT_ENGINES) == 4
 
     def test_default_engines_contains_key_backends(self):
-        for engine in ("duckduckgo", "brave", "google", "mojeek", "yandex"):
+        for engine in ("duckduckgo", "brave", "yahoo", "yandex"):
             assert engine in DEFAULT_ENGINES
 
     def test_index_family_mapping(self):
         # DDG and Yahoo share Bing's index
         assert _INDEX_FAMILY["duckduckgo"] == _INDEX_FAMILY["yahoo"] == "bing"
-        # Google and Startpage share Google's index
-        assert _INDEX_FAMILY["google"] == _INDEX_FAMILY["startpage"] == "google"
         # Brave has its own independent index
         assert _INDEX_FAMILY["brave"] == "brave"
-        # Mojeek has its own independent index
-        assert _INDEX_FAMILY["mojeek"] == "mojeek"
+        # Yandex has its own independent index
+        assert _INDEX_FAMILY["yandex"] == "yandex"

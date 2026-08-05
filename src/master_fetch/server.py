@@ -27,8 +27,8 @@ from datetime import datetime, timezone
 from time import time as now
 from dataclasses import dataclass, field
 from typing import Annotated, Mapping, Sequence, Optional, Literal, Union, Dict, List, Any, TYPE_CHECKING
+from urllib.parse import urlparse
 import warnings as _warnings
-import sys as _sys
 import traceback as _traceback
 
 # Production cleanliness: on Windows the ProactorEventLoop's stdio/subprocess
@@ -47,7 +47,7 @@ _warnings.filterwarnings("ignore", message="unclosed .*transport", category=Reso
 # the hook to swallow ONLY that benign asyncio-transport teardown noise; every
 # other unraisable exception still goes to the original hook (real bugs stay
 # visible). This is what keeps `python -m master_fetch` stderr clean on exit.
-_ORIG_UNRAISABLEHOOK = getattr(_sys, "unraisablehook", None)
+_ORIG_UNRAISABLEHOOK = getattr(sys, "unraisablehook", None)
 
 def _quiet_asyncio_del_hook(args):
     etype = getattr(args, "exc_type", None)
@@ -72,7 +72,7 @@ def _quiet_asyncio_del_hook(args):
             pass
 
 try:
-    _sys.unraisablehook = _quiet_asyncio_del_hook
+    sys.unraisablehook = _quiet_asyncio_del_hook
 except Exception:
     pass
 
@@ -173,6 +173,54 @@ MAX_CONTENT_CHARS = 40000
 MIN_CHUNK_CHARS = 500  # if remaining < this, merge into current chunk (avoids wasteful round-trips)
 MAX_RESPONSE_BYTES = 50 * 1024 * 1024  # 50MB hard cap for response bodies
 MAX_BULK_URLS = 100  # hard cap to prevent DoS via unbounded parallel requests
+
+# Known slow-but-HTTP-accessible sites (Q&A, docs) that get a longer HTTP
+# timeout so they don't prematurely escalate to stealthy.
+_SLOW_HTTP_DOMAINS = frozenset({
+    "stackoverflow.com", "stackexchange.com", "serverfault.com",
+    "superuser.com", "askubuntu.com", "mathoverflow.com",
+})
+
+# Adaptive timeout: track per-domain response latency (EMA) so slow domains
+# get a longer timeout and fast domains fail sooner. In-memory only (resets on
+# restart, which is fine — it re-learns within 1-2 fetches).
+_DOMAIN_LATENCY: Dict[str, float] = {}  # domain -> avg response time (ms)
+
+
+def _record_latency(url: str, elapsed_ms: float) -> None:
+    """Record a domain's response time for adaptive timeout."""
+    try:
+        domain = urlparse(url).netloc
+        if not domain:
+            return
+        # Cap dict size to prevent unbounded growth (LRU-like: clear oldest half)
+        if len(_DOMAIN_LATENCY) > 1000:
+            keys = list(_DOMAIN_LATENCY.keys())
+            for k in keys[:500]:
+                _DOMAIN_LATENCY.pop(k, None)
+        old = _DOMAIN_LATENCY.get(domain)
+        if old is None:
+            _DOMAIN_LATENCY[domain] = elapsed_ms
+        else:
+            _DOMAIN_LATENCY[domain] = 0.8 * old + 0.2 * elapsed_ms  # EMA
+    except Exception:
+        pass
+
+
+def _adaptive_timeout(url: str, default_ms: int = 30000) -> int:
+    """Get an adaptive timeout for a URL based on historical domain latency.
+
+    Returns 3x the EMA latency, clamped to [5s, 60s]. Falls back to default_ms
+    for unknown domains.
+    """
+    try:
+        domain = urlparse(url).netloc
+        latency = _DOMAIN_LATENCY.get(domain)
+        if latency is None:
+            return default_ms
+        return max(5000, min(60000, int(latency * 3)))
+    except Exception:
+        return default_ms
 def _env_int(name: str, default: int) -> int:
     """Read an integer env var, falling back to default on missing/invalid."""
     raw = os.environ.get(name)
@@ -430,6 +478,11 @@ def _detect_content_issue(result: ResponseModel) -> str:
     if result.status >= 400:
         return f"http_error_{result.status}: server returned error status"
     if result.status == 0:
+        # Preserve the original error content (from stealthy_fetch / HTTP layer)
+        # so downstream classify_network_error() can identify the failure type.
+        existing = result.error or ""
+        if existing and not existing.startswith("network_error"):
+            return f"network_error: {existing[:150]}"
         return "network_error: request failed (DNS/timeout/connection refused)"
 
     return ""
@@ -458,6 +511,13 @@ def _is_cacheable(result: ResponseModel) -> bool:
     return bool(result.content) and any(c.strip() for c in result.content)
 
 
+def _should_try_archive(result: ResponseModel) -> bool:
+    """True when the Internet Archive may have a usable snapshot of the URL.
+
+    Fires on hard-blocks (404/451), network failures (status 0), server errors
+    (5xx), bot challenges, and all_tiers_failed. Does NOT fire on auth_required
+    (archive won't have login-gated content either).
+    """
     err = (result.error or "").lower()
     if result.status == 404:      # page gone/deleted — archive goldmine
         return True
@@ -470,8 +530,6 @@ def _is_cacheable(result: ResponseModel) -> bool:
     if result.status in (403, 503) and "bot_challenge" in err:
         return True
     if err.startswith("all_tiers_failed"):
-        return True
-    if err.startswith("auth_required"):
         return True
     return False
 
@@ -510,7 +568,7 @@ def _agent_hints(result: ResponseModel) -> tuple[str, str, bool]:
             and has_content
         )
 
-    size = result.total_size_bytes or sum(len(c) for c in result.content)
+    size = result.total_extracted_chars or sum(len(c) for c in result.content)
     parts: list[str] = []
     if result.status == 0:
         parts.append("network error")
@@ -548,9 +606,29 @@ def _agent_hints(result: ResponseModel) -> tuple[str, str, bool]:
     elif err.startswith("not_a_pdf") or err.startswith("pdf_open_failed") or err.startswith("pdf_extract_failed"):
         next_action = "PDF could not be parsed - see error field"
     elif "all_tiers_failed" in err:
-        next_action = "all fetchers failed; site may use unbypassable protection (DataDome/Akamai/Turnstile) - switch sources"
+        from master_fetch.errors import classify_network_error
+        raw_err = " ".join(result.content) if result.content else err
+        category, _ = classify_network_error(raw_err)
+        if category == "connection_refused":
+            next_action = ("All fetch tiers failed: connection refused. The site is unreachable "
+                          "from this network (site down or outbound connections blocked). "
+                          "Do NOT retry - switch to a different source.")
+        elif category == "connection_reset":
+            next_action = ("All fetch tiers failed: connection reset by remote host (anti-bot or "
+                          "firewall). Try a proxy, or switch sources.")
+        elif category == "timeout":
+            next_action = ("All fetch tiers failed: timeout. The site is unresponsive. "
+                          "Retry once with a longer timeout, or switch sources.")
+        elif category == "dns_failure":
+            next_action = ("All fetch tiers failed: DNS resolution failed. Verify the URL "
+                          "is correct; do NOT retry.")
+        else:
+            next_action = ("All fetch tiers failed. The site may use unbypassable protection "
+                          "(DataDome/Akamai/Turnstile) or is unreachable - switch sources.")
     elif result.status == 0 or result.status >= 400:
-        next_action = "fetch failed - see error field"
+        from master_fetch.errors import classify_network_error
+        _, hint = classify_network_error(err)
+        next_action = hint
 
     # v10 envelope-driven next actions: fire ONLY when the fetch succeeded with
     # real content and no error-driven next_action already fired. Turn the
@@ -1231,6 +1309,19 @@ class MasterFetchServer:
         check+import is off the event loop.
         """
         async def _warm():
+            # Quick network preflight: skip browser prewarm if the network is
+            # unreachable (saves 2-5s launching a browser that can't connect).
+            def _quick_network_check():
+                import socket
+                try:
+                    s = socket.create_connection(("1.1.1.1", 443), timeout=2)
+                    s.close()
+                    return True
+                except Exception:
+                    return False
+            if not await asyncio.to_thread(_quick_network_check):
+                logger.info("Network unreachable, skipping browser prewarm")
+                return
             # Both the availability check AND the import run in the thread.
             # check_browser_available() does import patchright and caches the
             # result. After this, the cache-only reader returns instantly
@@ -1410,9 +1501,17 @@ class MasterFetchServer:
         # the whole TTL (and the cache-hit path doesn't restore the error field,
         # so content_ok would come back True — the agent would trust garbage).
         if cache_ttl > 0 and _is_cacheable(result):
+            # Auto-adjust TTL by page_type when using the default TTL.
+            # Docs rarely change (24h); articles change occasionally (6h);
+            # list/other pages use the default (1h). User-explicit TTL is
+            # always respected (cache_ttl != DEFAULT_TTL means user chose it).
+            effective_ttl = cache_ttl
+            if cache_ttl == DEFAULT_TTL and result.page_type:
+                _TTL_BY_PAGE_TYPE = {"docs": 86400, "article": 21600}
+                effective_ttl = _TTL_BY_PAGE_TYPE.get(result.page_type, cache_ttl)
             await set_cached(
                 url, extraction_type, result.content, result.status,
-                css_selector, cache_ttl,
+                css_selector, effective_ttl,
                 content_type=result.content_type,
                 total_size_bytes=result.total_size_bytes,
                 pages=_PDF_PAGES.get(),
@@ -1823,18 +1922,18 @@ class MasterFetchServer:
             results = []
             for i, resp in enumerate(timed_responses):
                 if isinstance(resp, BaseException):
-                    results.append(ResponseModel(
+                    results.append(_with_agent_hints(ResponseModel(
                         url=urls[i], status=0,
                         content=[f"[Fetch error: {redact_api_key(str(resp)[:200])}]"],
                         fetcher_used="http", error=redact_api_key(str(resp)[:200]),
-                    ))
+                    )))
                 else:
                     page, elapsed = resp
-                    results.append(_annotate_quality(
+                    results.append(_with_agent_hints(_annotate_quality(
                             _translate_response(
                                 page, extraction_type, css_selector, main_content_only, use_tf, "http", elapsed,
                             )
-                        ))
+                        )))
         successful = sum(1 for r in results if r.status < 400 and not r.error)
         return BulkResponseModel(results=results, total=len(results), successful=successful)
 
@@ -2008,18 +2107,18 @@ class MasterFetchServer:
         results = []
         for i, resp in enumerate(timed_responses):
             if isinstance(resp, BaseException):
-                results.append(ResponseModel(
+                results.append(_with_agent_hints(ResponseModel(
                     url=urls[i], status=0,
                     content=[f"[Fetch error: {redact_api_key(str(resp)[:200])}]"],
                     fetcher_used="dynamic", error=redact_api_key(str(resp)[:200]),
-                ))
+                )))
             else:
                 page, elapsed = resp
-                results.append(_annotate_quality(
+                results.append(_with_agent_hints(_annotate_quality(
                         _translate_response(
                             page, extraction_type, css_selector, main_content_only, use_tf, "dynamic", elapsed,
                         )
-                    ))
+                    )))
         successful = sum(1 for r in results if r.status < 400 and not r.error)
         return BulkResponseModel(results=results, total=len(results), successful=successful)
 
@@ -2236,18 +2335,18 @@ class MasterFetchServer:
         results = []
         for i, resp in enumerate(timed_responses):
             if isinstance(resp, BaseException):
-                results.append(ResponseModel(
+                results.append(_with_agent_hints(ResponseModel(
                     url=urls[i], status=0,
                     content=[f"[Fetch error: {redact_api_key(str(resp)[:200])}]"],
                     fetcher_used="stealthy", error=redact_api_key(str(resp)[:200]),
-                ))
+                )))
             else:
                 page, elapsed = resp
-                results.append(_annotate_quality(
+                results.append(_with_agent_hints(_annotate_quality(
                         _translate_response(
                             page, extraction_type, css_selector, main_content_only, use_tf, "stealthy", elapsed,
                         )
-                    ))
+                    )))
         successful = sum(1 for r in results if r.status < 400 and not r.error)
         return BulkResponseModel(results=results, total=len(results), successful=successful)
 
@@ -2334,6 +2433,7 @@ class MasterFetchServer:
         actions: Annotated[Optional[List[Dict[str, Any]]], Field(description="Page interactions run on the stealthy browser AFTER load, BEFORE extraction: [{click:'button.load-more'}, {fill:{selector:'#q', text:'x'}}, {press:'Enter'}, {wait:500}, {scroll:3}, {wait_selector:'.item'}]. Forces the stealthy tier; bypasses cache. Reaches content behind a click/form/infinite scroll.")] = None,
         include_media: Annotated[bool, Field(description="If true, populate the response .media field with up to 20 image URLs found on the page (for multimodal agents). Default false (keeps responses lean).")] = False,
         include_links: Annotated[bool, Field(description="If true, populate the response .links field with the page's outgoing links classified as citations/navigation/external + a primary_source hint. Default false. Use when you want to follow a page's referenced sources in one step.")] = False,
+        schema: Annotated[Optional[Dict[str, Any]], Field(description="JSON schema for structured data extraction. Each property can have a 'selector' (CSS) for direct DOM extraction. Returns structured JSON instead of markdown. No LLM needed.")] = None,
     ) -> ResponseModel:
         """Fetch a URL (or multiple URLs) with automatic anti-bot escalation.
 
@@ -2367,6 +2467,7 @@ class MasterFetchServer:
                 headless, real_chrome, wait, proxy, timeout, network_idle,
                 solve_cloudflare, block_webrtc, hide_canvas, extra_headers,
                 useragent, cookies, max_content_chars, include_media, include_links,
+                schema=schema,
             )
 
         # Validate all inputs
@@ -2378,10 +2479,11 @@ class MasterFetchServer:
         # max_content_chars: token-spend control. Lower = less context per call,
         # the rest is paginated via offset/next_offset.
         if max_content_chars is not None:
-            if isinstance(max_content_chars, bool) or not isinstance(max_content_chars, int) \
-                    or max_content_chars < 500:
-                raise ValueError("max_content_chars must be an int >= 500")
-            max_content_chars = min(max_content_chars, 200000)
+            if isinstance(max_content_chars, bool) or not isinstance(max_content_chars, int):
+                max_content_chars = MAX_CONTENT_CHARS
+            else:
+                # Clamp to [500, 200000] instead of raising (avoids Parse Error)
+                max_content_chars = max(500, min(max_content_chars, 200000))
         mc = max_content_chars if isinstance(max_content_chars, int) else MAX_CONTENT_CHARS
 
         # PDF options flow down to _translate_response via contextvars (task-local,
@@ -2399,6 +2501,47 @@ class MasterFetchServer:
         # bypass the cache so a plain (pre-action) cached copy is never served.
         if actions:
             cache_ttl = 0
+
+        # 0. Schema-based structured extraction: fetch as HTML, then extract
+        # structured JSON using CSS selectors + metadata + JSON-LD (no LLM).
+        # NOTE: When schema is active, focus is IGNORED (schema extracts from raw
+        # HTML; focus filters markdown output — combining them produces inconsistent
+        # results where schema has data but focus-filtered content is empty).
+        if schema and isinstance(schema, dict) and (schema.get("properties") or schema.get("type") == "auto" or schema.get("mode") == "auto"):
+            # Security: validate all CSS selectors in the schema before use
+            from master_fetch.security import validate_css_selector, SecurityError
+            try:
+                for _fn, _fs in schema.get("properties", {}).items():
+                    if isinstance(_fs, dict) and _fs.get("selector"):
+                        _fs["selector"] = validate_css_selector(_fs["selector"])
+            except SecurityError as se:
+                return ResponseModel(
+                    url=url, status=0, content=[""],
+                    fetcher_used="none", error=f"schema validation error: {se}",
+                )
+            # Robots.txt compliance (must check before fetching)
+            if respect_robots and not await is_allowed(url):
+                return ResponseModel(
+                    url=url, status=0, content=[""],
+                    fetcher_used="none", error="robots_txt_disallowed",
+                )
+            html_result = await self._auto_escalate(
+                url, "html", css_selector, main_content_only,
+                use_trafilatura, cache_ttl, 0, headless, real_chrome, wait,
+                proxy, timeout, network_idle, solve_cloudflare, block_webrtc,
+                hide_canvas, extra_headers, useragent, cookies, mc,
+            )
+            html_content = "\n".join(html_result.content) if html_result.content else ""
+            if html_content and html_result.status < 400:
+                from master_fetch.structured import extract_structured
+                structured = await asyncio_to_thread(
+                    extract_structured, html_content, schema, url,
+                    html_result.metadata or {},
+                )
+                import json as _json_mod
+                html_result.content = [_json_mod.dumps(structured, ensure_ascii=False, indent=2)]
+                html_result.extracted_type = "structured"
+            return html_result
 
         # 1. Check robots.txt compliance
         if respect_robots and not await is_allowed(url):
@@ -2503,8 +2646,14 @@ class MasterFetchServer:
         solve_cloudflare, block_webrtc, hide_canvas, extra_headers,
         useragent, cookies, max_chars: int = MAX_CONTENT_CHARS,
         include_media: bool = False, include_links: bool = False,
+        schema=None,
     ) -> BulkResponseModel:
-        """Fetch multiple URLs in parallel through the smart fetch pipeline."""
+        """Fetch multiple URLs in parallel through the smart fetch pipeline.
+
+        When schema is provided, each URL is fetched as HTML and structured
+        extraction is applied — enabling batch structured extraction
+        (URL list + unified schema → structured results list).
+        """
         if len(urls) > MAX_BULK_URLS:
             raise ValueError(
                 f"Too many URLs ({len(urls)}). Maximum is {MAX_BULK_URLS} per call."
@@ -2524,6 +2673,7 @@ class MasterFetchServer:
                     useragent=useragent, cookies=cookies,
                     max_content_chars=max_chars,
                     include_media=include_media, include_links=include_links,
+                    schema=schema,
                 )
             except Exception as e:
                 return _with_agent_hints(ResponseModel(
@@ -2585,6 +2735,57 @@ class MasterFetchServer:
             result.escalation_path = "direct:stealthy"
             return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)
 
+    async def _fetch_from_archive(
+        self, url: str, extraction_type: str, css_selector: Optional[str],
+        main_content_only: bool, use_trafilatura: bool, offset: int, max_chars: int,
+    ) -> Optional[ResponseModel]:
+        """Try to fetch content from the Internet Archive (Wayback Machine).
+
+        Returns a ResponseModel with source='archive.org' and archived_at set,
+        or None if no usable snapshot exists. Never raises — failures return None
+        so the caller can fall through to the original error response.
+
+        Uses the Wayback Availability API (free, no key):
+        https://archive.org/wayback/available?url=<url>
+        """
+        try:
+            # 1. Query the Wayback Availability API for the closest snapshot
+            from urllib.parse import quote as _url_quote
+            api_url = f"https://archive.org/wayback/available?url={_url_quote(url, safe='')}"
+            api_resp = await _fallback_http_get(api_url, timeout=10)
+            if api_resp.status != 200 or not api_resp.body:
+                return None
+            import json as _json
+            data = _json.loads(api_resp.body)
+            snapshot = (data.get("archived_snapshots") or {}).get("closest") or {}
+            snapshot_url = snapshot.get("url", "")
+            snapshot_date = snapshot.get("timestamp", "")  # YYYYMMDDHHmmss
+            if not snapshot_url or not snapshot.get("available"):
+                return None
+
+            # 2. Fetch the snapshot page via HTTP tier
+            snap_resp = await self._http_with_retry(
+                snapshot_url, extraction_type=extraction_type,
+                css_selector=css_selector, main_content_only=main_content_only,
+                use_trafilatura=use_trafilatura, timeout=15,
+            )
+            if snap_resp.status >= 400 or not snap_resp.content or not any(c.strip() for c in snap_resp.content):
+                return None
+
+            # 3. Mark as archive-sourced
+            snap_resp.source = "archive.org"
+            # Parse timestamp: 20230415120000 -> 2023-04-15
+            if len(snapshot_date) >= 8:
+                snap_resp.archived_at = f"{snapshot_date[:4]}-{snapshot_date[4:6]}-{snapshot_date[6:8]}"
+            snap_resp.url = url  # report the ORIGINAL url, not the archive url
+            snap_resp.escalation_path = "http→stealthy→archive.org"
+            snap_resp.error = ""  # clear any error from the HTTP fetch
+            logger.info(f"Archive.org fallback succeeded for {url} (snapshot: {snap_resp.archived_at})")
+            return snap_resp
+        except Exception as e:
+            logger.debug(f"Archive.org fallback failed for {url}: {e}")
+            return None
+
     async def _auto_escalate(
         self, url, extraction_type, css_selector, main_content_only,
         use_trafilatura, cache_ttl, offset, headless, real_chrome, wait,
@@ -2602,16 +2803,49 @@ class MasterFetchServer:
         errors = []
         http_cookies = _safe_cookie_dict(cookies)
         # HTTP fetcher takes seconds; browser timeout is ms. Cap at 30s.
-        http_timeout = max(1, min(int(timeout / 1000), 30))
+        # Adaptive: use historical domain latency if available.
+        http_timeout = max(1, min(int(_adaptive_timeout(url, timeout) / 1000), 30))
+
+        # TCP preflight: fail fast (2s) if the host is unreachable, saving
+        # 30-60s of HTTP+Stealthy timeouts. Only for definitive failures
+        # (connection_refused, dns_failure); timeout/unknown still try HTTP.
+        from master_fetch.fetcher import tcp_preflight
+        reachable, preflight_category = await asyncio_to_thread(tcp_preflight, url, 2.0)
+        if not reachable and preflight_category in ("connection_refused", "dns_failure"):
+            from master_fetch.errors import get_hint
+            elapsed = (now() - start_time) * 1000
+            result = ResponseModel(
+                url=url, status=0, content=[""],
+                fetcher_used="none", error=f"network_error: {preflight_category} (TCP preflight)",
+                duration_ms=elapsed,
+            )
+            result.escalation_path = f"preflight:{preflight_category}(skipped_http+stealthy)"
+            # Try archive.org before giving up
+            if _should_try_archive(result):
+                archive_result = await self._fetch_from_archive(
+                    url, extraction_type, css_selector, main_content_only,
+                    use_trafilatura, offset, max_chars,
+                )
+                if archive_result is not None:
+                    archive_result.duration_ms = (now() - start_time) * 1000
+                    return await self._finalize_result(archive_result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)
+            return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)
 
         # Tier 1: HTTP (always try first — it's fast)
+        # Domain-specific timeout boost: known slow-but-HTTP-accessible sites
+        # (Q&A, docs) get a longer HTTP timeout so they don't prematurely
+        # escalate to stealthy (which may also timeout in restricted networks).
+        _domain = urlparse(url).netloc.lower()
+        _effective_http_timeout = http_timeout
+        if _domain in _SLOW_HTTP_DOMAINS or any(_domain.endswith("." + d) for d in _SLOW_HTTP_DOMAINS):
+            _effective_http_timeout = max(http_timeout, 20)  # at least 20s for Q&A sites
         result = await self._http_with_retry(
             url, extraction_type=extraction_type,
             css_selector=css_selector, main_content_only=main_content_only,
             use_trafilatura=use_trafilatura,
             proxy=proxy if isinstance(proxy, str) else None,
             headers=extra_headers, cookies=http_cookies, stealthy_headers=True,
-            timeout=http_timeout,
+            timeout=_effective_http_timeout,
         )
         elapsed = (now() - start_time) * 1000
         result.duration_ms = elapsed
@@ -2626,6 +2860,7 @@ class MasterFetchServer:
         # Accept if status is OK and content is real (not a JS shell).
         if result.status < 400 and not _is_js_shell(result):
             result.escalation_path = "direct:http"
+            _record_latency(url, elapsed)  # track for adaptive timeout
             return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)
 
         # Should we escalate? Stealthy browser can genuinely help for:
@@ -2640,6 +2875,16 @@ class MasterFetchServer:
             or result.status in (403, 429, 500, 502, 503)
         )
         if not should_escalate:
+            # Archive.org fallback for hard-blocks (404/410/451): the page is
+            # gone or legally removed, but the Wayback Machine may have a snapshot.
+            if result.status in (404, 410, 451) and _should_try_archive(result):
+                archive_result = await self._fetch_from_archive(
+                    url, extraction_type, css_selector, main_content_only,
+                    use_trafilatura, offset, max_chars,
+                )
+                if archive_result is not None:
+                    archive_result.duration_ms = (now() - start_time) * 1000
+                    return await self._finalize_result(archive_result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)
             result.duration_ms = elapsed
             return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)
 
@@ -2678,22 +2923,62 @@ class MasterFetchServer:
 
         # All tiers failed
         errors.append(f"Stealthy failed (status {result.status})")
+        # Classify the failure for agent-actionable tips
+        from master_fetch.errors import classify_network_error
+        raw_error = result.error or " ".join(errors)
+        category, _ = classify_network_error(raw_error)
+        if category in ("connection_refused", "dns_failure"):
+            tips = (
+                "- The site is unreachable from this network (site down or outbound blocked).\n"
+                "- Do NOT retry the same URL - switch to a different source.\n"
+                "- If multiple sites fail, your network environment may block outbound connections."
+            )
+        elif category == "connection_reset":
+            tips = (
+                "- The remote host forcibly closed the connection (anti-bot firewall).\n"
+                "- Try with a proxy via the proxy parameter.\n"
+                "- Try a different URL on the same domain (some paths have lower protection).\n"
+                "- If it persists, switch sources."
+            )
+        elif category == "timeout":
+            tips = (
+                "- The site is unresponsive (slow server or network restriction).\n"
+                "- Retry once with a higher timeout parameter.\n"
+                "- If it persists, switch sources."
+            )
+        else:
+            tips = (
+                "- If the site uses Cloudflare Turnstile or DataDome, no free tool can bypass it.\n"
+                "- Try a different URL on the same domain (some paths have lower protection).\n"
+                "- Try with a proxy via the proxy parameter."
+            )
         result.content = [
             f"[All fetch tiers failed for {url}]\n"
             f"Attempted: HTTP → Stealthy\n"
             f"Failures: {'; '.join(errors)}\n"
+            f"Error type: {category}\n"
             f"Final status: {result.status}\n"
             f"\n"
             f"Tips:\n"
-            f"- If the site uses Cloudflare Turnstile or DataDome, no free tool can bypass it.\n"
-            f"- Try a different URL on the same domain (some paths have lower protection).\n"
-            f"- Set solve_cloudflare=True (already tried).\n"
-            f"- Try with a proxy via the proxy parameter."
+            f"{tips}"
         ]
         result.escalation_path = "http→stealthy(all_failed)"
         result.retry_count = 2
         result.duration_ms = elapsed
-        result.error = f"all_tiers_failed: HTTP status {result.status}"
+        result.error = f"all_tiers_failed: {category} (HTTP status {result.status})"
+
+        # Archive.org fallback: when the live site is unreachable, try the
+        # Internet Archive's closest snapshot. Fires on hard-blocks, network
+        # failures, and server errors. Never blocks the original error response.
+        if _should_try_archive(result):
+            archive_result = await self._fetch_from_archive(
+                url, extraction_type, css_selector, main_content_only,
+                use_trafilatura, offset, max_chars,
+            )
+            if archive_result is not None:
+                archive_result.duration_ms = (now() - start_time) * 1000
+                return await self._finalize_result(archive_result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)
+
         return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)
 
     # ─── Cache Management ──────────────────────────────────────────
@@ -2738,6 +3023,104 @@ class MasterFetchServer:
             update_command="hound -u",
         )
 
+    # ─── Parse (local file) ─────────────────────────────────────────
+
+    async def parse(
+        self,
+        file_path: Annotated[str, Field(description="Absolute or relative path to a local file. Supported: .html, .docx, .xlsx, .csv")],
+    ) -> ResponseModel:
+        """Parse a local file to Markdown. Supports .html, .docx, .xlsx, .csv.
+
+        For PDF files, use smart_fetch instead (it has OCR support).
+        """
+        # Security: validate file path to prevent path traversal attacks.
+        # Resolve symlinks and block access to sensitive system directories.
+        import os as _os
+        resolved = _os.path.realpath(_os.path.expanduser(file_path))
+        _BLOCKED_DIRS = (
+            # Windows system directories
+            "c:\\windows", "c:\\program files", "c:\\program files (x86)",
+            # Unix system directories
+            "/etc", "/proc", "/sys", "/dev", "/boot", "/var/run",
+            # Sensitive user directories
+            _os.path.expanduser("~/.ssh"),
+            _os.path.expanduser("~/.gnupg"),
+            _os.path.expanduser("~/.aws"),
+        )
+        resolved_lower = resolved.lower().replace("/", "\\") if _os.name == "nt" else resolved
+        for blocked in _BLOCKED_DIRS:
+            blocked_norm = blocked.lower().replace("/", "\\") if _os.name == "nt" else blocked
+            if resolved_lower.startswith(blocked_norm):
+                return ResponseModel(
+                    url=f"file://{file_path}", status=0, content=[""],
+                    fetcher_used="parse",
+                    error=f"Access denied: path is in a restricted system directory ({blocked})",
+                )
+        from master_fetch.parse import parse_file
+        content, error = await asyncio_to_thread(parse_file, resolved)
+        if error:
+            return ResponseModel(
+                url=f"file://{file_path}", status=0, content=[""],
+                fetcher_used="parse", error=error,
+            )
+        return ResponseModel(
+            url=f"file://{file_path}", status=200, content=[content],
+            fetcher_used="parse", extracted_type="markdown",
+            content_ok=True,
+        )
+
+    # ─── Monitor ────────────────────────────────────────────────────
+
+    async def smart_monitor(
+        self,
+        url: Annotated[str, Field(description="URL to monitor for content changes.")],
+        action: Annotated[str, Field(description="Action: 'check' (fetch + compare + update snapshot), 'list' (show all monitored URLs), 'check_all' (batch-check ALL monitored URLs, returns change summary).") ] = "check",
+    ):
+        """Monitor a web page for content changes. Call periodically to detect updates.
+
+        check: fetches the page, compares with last snapshot, reports diff.
+        list: returns all monitored URLs with their last check status.
+        check_all: batch-checks ALL monitored URLs in one call. Returns which changed/unchanged/errored.
+            Use this for periodic polling (e.g. agent calls it every N minutes).
+        """
+        from master_fetch.monitor import monitor_check, monitor_list, monitor_check_all, MonitorResponse
+        if action == "list":
+            items = await monitor_list()
+            return {"monitors": items, "total": len(items)}
+        if action == "check_all":
+            return await monitor_check_all(self)
+        # Security: validate URL at the entry point (defense in depth)
+        from master_fetch.security import validate_url, SecurityError
+        try:
+            url = validate_url(url)
+        except SecurityError as se:
+            return MonitorResponse(url=url, status="error", error=str(se))
+        # action == "check"
+        return await monitor_check(self, url)
+
+    # ─── Research ──────────────────────────────────────────────────
+
+    async def smart_research(
+        self,
+        query: str,
+        max_sources: int = 3,
+        max_paragraphs: int = 20,
+        cache_ttl: int = 300,
+    ):
+        """Rule-driven research: search + fetch top results + merge relevant paragraphs.
+
+        One call does what an agent would do in 5+ calls:
+        search(query) -> pick high-relevance URLs -> fetch each with focus=query
+        -> deduplicate paragraphs -> return structured report.
+
+        No LLM. $0. Returns sources + merged_paragraphs.
+        """
+        from master_fetch.research import smart_research as _smart_research
+        return await _smart_research(
+            self, query, max_sources=max_sources,
+            max_paragraphs=max_paragraphs, cache_ttl=cache_ttl,
+        )
+
     # ─── Search ────────────────────────────────────────────────────
 
     async def smart_search(
@@ -2755,6 +3138,8 @@ class MasterFetchServer:
         region: Optional[str] = None,
         page: int = 0,
         freshness: Optional[str] = None,
+        fetch_content: bool = False,
+        fetch_schema: Optional[Dict[str, Any]] = None,
     ) -> SearchResponseModel:
         """Local keyless web search (no API key, no account, no third-party service).
 
@@ -2780,7 +3165,7 @@ class MasterFetchServer:
 
         try:
             from master_fetch.search import smart_search as _smart_search
-            return await _smart_search(
+            result = await _smart_search(
                 self, query, max_results, cache_ttl,
                 mode=mode, engines=engines, url=url,
                 site=site, exclude_sites=exclude_sites,
@@ -2792,6 +3177,36 @@ class MasterFetchServer:
                 query=query, results=[], total_results=0,
                 error=redact_api_key(str(e)[:200]),
             )
+
+        # P0: auto-fetch top results' content when fetch_content=true
+        if fetch_content and result.results:
+            fetched_pages = []
+            # Fetch top 3 high-relevance results with focus=query (or schema extraction)
+            high_results = [r for r in result.results if r.fetch_relevance == "high"][:3]
+            if not high_results:
+                high_results = result.results[:3]
+            for sr in high_results:
+                try:
+                    page_result = await self.smart_fetch(
+                        url=sr.url, focus=query if not fetch_schema else None,
+                        schema=fetch_schema, cache_ttl=cache_ttl,
+                        max_content_chars=8000, timeout=15000,
+                    )
+                    fetched_pages.append({
+                        "url": sr.url,
+                        "title": sr.title,
+                        "content": "\n".join(page_result.content)[:8000] if page_result.content else "",
+                        "content_ok": page_result.content_ok,
+                    })
+                    # Implicit feedback: record domain as useful
+                    if page_result.content_ok:
+                        from master_fetch.search import record_search_feedback
+                        record_search_feedback(sr.url)
+                except Exception:
+                    pass  # silently skip failed fetches
+            result.fetched_pages = fetched_pages
+
+        return result
 
     # ─── Crawl ─────────────────────────────────────────────────────
 
@@ -2814,6 +3229,7 @@ class MasterFetchServer:
         timeout: int = 30000,
         deadline_ms: int = 120000,
         sitemap: str | bool = False,
+        search: Optional[str] = None,
     ) -> "CrawlResponseModel":
         """Deep-crawl a site: best-first same-domain from `url`, returning each
         page as markdown with content_ok/summary/page_type. discover_only=true
@@ -2824,8 +3240,14 @@ class MasterFetchServer:
         JS shells -> detected + reported honestly. Caps: max_pages, max_depth,
         max_total_chars (token budget), deadline_ms (overall time). Reuses
         smart_fetch anti-bot escalation + cache.
+
+        search: filter discovered/crawled URLs by keyword match (URL path + title).
+            Use with discover_only=True for fast URL discovery on large sites.
         """
         try:
+            # Lazy import to break circular dependency (crawl.py imports
+            # ResponseModel from server.py; server.py imports smart_crawl
+            # from crawl.py). Function-level import avoids import-time cycle.
             from master_fetch.crawl import smart_crawl as _smart_crawl, CrawlResponseModel as _CRM
             return await _smart_crawl(
                 self, url, max_pages=max_pages, max_depth=max_depth,
@@ -2835,7 +3257,7 @@ class MasterFetchServer:
                 max_total_chars=max_total_chars, concurrency=concurrency,
                 cache_ttl=cache_ttl, respect_robots=respect_robots,
                 force_fetcher=force_fetcher, timeout=timeout,
-                deadline_ms=deadline_ms, sitemap=sitemap,
+                deadline_ms=deadline_ms, sitemap=sitemap, search=search,
             )
         except Exception as e:
             from master_fetch.crawl import CrawlResponseModel as _CRM
@@ -2864,7 +3286,8 @@ class MasterFetchServer:
                     "pages": {"type": "string", "description": "PDF only: page spec like '1-5' or '1,3,5-7'. Use table_of_contents page/end_page ranges to pick. None = all pages."},
                     "password": {"type": "string", "description": "PDF only: password for an encrypted PDF."},
                     "focus": {"type": "string", "description": "Query-focused extraction: only BM25-relevant blocks returned. Context saver on long pages. Post-cache (no re-fetch). Re-pass same focus when paginating."},
-                    "actions": {"type": "array", "description": "Page interactions on stealthy browser AFTER load, BEFORE extraction. Forces stealthy + bypasses cache. Each item: {click:'css'}, {fill:{selector:'css',text:'x'}}, {press:'Enter'}, {wait:500}, {scroll:3}, {wait_selector:'css'}. Use for load-more, search forms, pagination, infinite scroll."},
+                    "actions": {"type": "array", "items": {"type": "object", "additionalProperties": True}, "description": "Page interactions on stealthy browser AFTER load, BEFORE extraction. Forces stealthy + bypasses cache. Each item: {click:'css'}, {fill:{selector:'css',text:'x'}}, {press:'Enter'}, {wait:500}, {scroll:3}, {wait_selector:'css'}. Use for load-more, search forms, pagination, infinite scroll."},
+                    "schema": {"type": "object", "description": "JSON schema for structured data extraction. Each property can have a 'selector' (CSS) for direct DOM extraction. Returns structured JSON instead of markdown. No LLM needed.", "additionalProperties": True},
                     "options": {"type": "object", "description": "include_links (bool,false: response.links=citations/navigation/external+primary_source), include_media (bool,false: up to 20 page image URLs), proxy (str|dict), cookies (list), extra_headers (dict), useragent (str), wait (ms,0), network_idle (bool,SPAs), headless (bool,true), respect_robots (bool,false), real_chrome/solve_cloudflare/block_webrtc/hide_canvas/main_content_only/use_trafilatura (anti-detect tuning, good defaults, rarely needed).", "additionalProperties": True},
                 },
             },
@@ -2880,6 +3303,7 @@ class MasterFetchServer:
                     "discover_only": {"type": "boolean", "description": "true = return URL map only, no page content. For big sites prefer options sitemap=true (one-fetch map)."},
                     "focus": {"type": "string", "description": "Query: prioritize crawling links relevant to this + focus-filter each page. Token saver on doc sites."},
                     "crawl_urls": {"type": "array", "items": {"type": "string"}, "description": "Chosen subset of URLs to fetch (second-phase selective crawl, no re-discovery). Use after sitemap=true or discover_only=true."},
+                    "search": {"type": "string", "description": "Filter discovered/crawled URLs by keyword match (URL path + title). Use with discover_only=true for fast URL discovery on large sites."},
                     "options": {"type": "object", "description": "sitemap (true|'auto'|false,false: true=map from sitemap.xml in one fetch; 'auto'=use if present else BFS), max_pages (1-100,10), max_depth (0-5,2), path_include (list of path prefixes), path_exclude (list to skip), max_content_chars_per (8000), max_total_chars (token budget), concurrency (1-5,3), cache_ttl (3600;0=fresh), respect_robots (false), force_fetcher ('http'|'stealthy'), timeout (ms,30000), deadline_ms (120000).", "additionalProperties": True},
                 },
             },
@@ -2905,7 +3329,7 @@ class MasterFetchServer:
                 "type": "object", "required": ["query"],
                 "properties": {
                     "query": {"type": "string", "description": "Search query"},
-                    "options": {"type": "object", "description": "max_results (1-50,6), cache_ttl (300), mode (auto|neural|find_similar; auto=neural if [all]+model else consensus; find_similar needs url=), engines (list, default: ddg,brave,mojeek,yahoo,yandex,startpage,google,qwant; add 'wikipedia'/'grokipedia'), site (domain restrict), exclude_sites (list), location, language (2-letter), region, page (0-10), freshness (day|week|month|year), url (for find_similar).", "additionalProperties": True},
+                    "options": {"type": "object", "description": "max_results (1-50,6), cache_ttl (300), mode (auto|neural|find_similar; auto=neural if [all]+model else consensus; find_similar needs url=), engines (list, default: ddg,brave,mojeek,yahoo,yandex,startpage,google,qwant; add 'wikipedia'/'grokipedia'), site (domain restrict), exclude_sites (list), location, language (2-letter), region, page (0-10), freshness (day|week|month|year), url (for find_similar), fetch_content (bool,false: auto-fetch top 3 results' page content with focus=query, saves N separate smart_fetch calls).", "additionalProperties": True},
                 },
             },
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
@@ -2926,6 +3350,43 @@ class MasterFetchServer:
             "description": "Hound version + update status.",
             "inputSchema": {"type": "object", "properties": {}},
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False},
+        },
+        {
+            "name": "parse",
+            "description": "Parse a local file to Markdown. Supports .html, .docx, .xlsx, .csv. For PDF files, use smart_fetch instead (it has OCR support).",
+            "inputSchema": {
+                "type": "object", "required": ["file_path"],
+                "properties": {
+                    "file_path": {"type": "string", "description": "Absolute or relative path to a local file. Supported: .html, .docx, .xlsx, .csv"},
+                },
+            },
+            "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False},
+        },
+        {
+            "name": "smart_monitor",
+            "description": "Monitor a web page for content changes. Call periodically to detect updates. check: fetches the page, compares with last snapshot, reports diff. list: returns all monitored URLs with their last check status.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to monitor for content changes. Required for action='check', not needed for action='list'."},
+                    "action": {"type": "string", "enum": ["check", "list", "check_all"], "description": "Action: 'check' (fetch + compare + update snapshot), 'list' (show all monitored URLs), 'check_all' (batch-check ALL monitored URLs, returns change summary). Default: check."},
+                },
+            },
+            "annotations": {"readOnlyHint": True, "idempotentHint": False, "openWorldHint": True},
+        },
+        {
+            "name": "smart_research",
+            "description": "Rule-driven research: search + fetch top results + merge relevant paragraphs. One call replaces 5+ manual steps (search -> pick URLs -> fetch each -> extract -> merge). No LLM, $0. Returns sources with relevant_content + merged deduplicated paragraphs. Use for factual questions needing multiple sources.",
+            "inputSchema": {
+                "type": "object", "required": ["query"],
+                "properties": {
+                    "query": {"type": "string", "description": "Research question or topic"},
+                    "max_sources": {"type": "integer", "description": "Max pages to fetch (1-5, default 3)"},
+                    "max_paragraphs": {"type": "integer", "description": "Max merged paragraphs to return (default 20)"},
+                    "cache_ttl": {"type": "integer", "description": "Cache seconds for search+fetch (default 300)"},
+                },
+            },
+            "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
         },
     ]
 
@@ -3093,7 +3554,10 @@ class MasterFetchServer:
                 password=password,
                 cache_ttl=args.get("cache_ttl", DEFAULT_TTL),
                 force_fetcher=args.get("force_fetcher"),
-                offset=args.get("offset", 0), **kw,
+                offset=args.get("offset", 0),
+                focus=args.get("focus"),
+                actions=args.get("actions"),
+                schema=args.get("schema"), **kw,
             )
             return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
 
@@ -3106,7 +3570,8 @@ class MasterFetchServer:
             )}
             result = await self.smart_crawl(
                 url=args["url"], discover_only=args.get("discover_only", False),
-                focus=args.get("focus"), crawl_urls=args.get("crawl_urls"), **kw,
+                focus=args.get("focus"), crawl_urls=args.get("crawl_urls"),
+                search=args.get("search"), **kw,
             )
             return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
 
@@ -3121,7 +3586,7 @@ class MasterFetchServer:
             kw = {k: v for k, v in options.items() if k in (
                 "max_results", "cache_ttl", "mode", "engines", "url",
                 "site", "exclude_sites", "location", "language", "region", "page",
-                "freshness",
+                "freshness", "fetch_content", "fetch_schema",
             )}
             result = await self.smart_search(query=args["query"], **kw)
             return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
@@ -3132,6 +3597,26 @@ class MasterFetchServer:
 
         elif name == "version":
             result = await self.version()
+            return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
+
+        elif name == "parse":
+            result = await self.parse(file_path=args["file_path"])
+            return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
+
+        elif name == "smart_monitor":
+            result = await self.smart_monitor(url=args.get("url", ""), action=args.get("action", "check"))
+            if isinstance(result, dict):
+                import json as _j
+                return [TextContent(type="text", text=_j.dumps(result, ensure_ascii=False))], result
+            return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
+
+        elif name == "smart_research":
+            result = await self.smart_research(
+                query=args["query"],
+                max_sources=args.get("max_sources", 3),
+                max_paragraphs=args.get("max_paragraphs", 20),
+                cache_ttl=args.get("cache_ttl", 300),
+            )
             return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
 
         else:

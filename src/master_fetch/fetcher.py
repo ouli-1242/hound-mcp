@@ -537,12 +537,41 @@ async def http_get(
         )
 
 
-def _proxy_for_env() -> Optional[str]:
-    """Read proxy from environment, if set."""
-    import os
-    return os.environ.get("HOUND_SEARCH_PROXY")
+# ─── TCP preflight check ────────────────────────────────────────────────────────
 
+def tcp_preflight(url: str, timeout: float = 2.0) -> tuple[bool, str]:
+    """Quick TCP connect check to fail fast before a full HTTP/browser fetch.
 
-def search_proxy() -> Optional[str]:
-    """Get the search proxy, if configured."""
-    return _proxy_for_env()
+    Returns (reachable: bool, error_category: str). error_category is empty
+    when reachable, otherwise one of: connection_refused, dns_failure, timeout.
+
+    Synchronous — call from a worker thread via asyncio.to_thread().
+    Never raises.
+    """
+    import socket
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+        if not host:
+            return False, "dns_failure"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.close()
+        return True, ""
+    except ConnectionRefusedError:
+        return False, "connection_refused"
+    except socket.gaierror:
+        return False, "dns_failure"
+    except (socket.timeout, TimeoutError):
+        return False, "timeout"
+    except OSError as e:
+        # Windows: os error 10061 = connection refused, 10054 = reset
+        err_str = str(e)
+        if "10061" in err_str or "refused" in err_str.lower():
+            return False, "connection_refused"
+        if "10054" in err_str or "reset" in err_str.lower():
+            return False, "connection_reset"
+        return False, "unknown"
+    except Exception:
+        return False, "unknown"

@@ -832,6 +832,22 @@ def doctor() -> None:
         checks.append(("PyPI reachable", True,
                        "up to date" if ahead else f"v{latest} available"))
 
+    # 9. Outbound network connectivity (critical for fetch/search)
+    import socket as _socket
+    _net_ok = False
+    _net_detail = "all targets unreachable"
+    for _host, _port in [("1.1.1.1", 443), ("google.com", 443), ("archive.org", 443)]:
+        try:
+            _s = _socket.create_connection((_host, _port), timeout=5)
+            _s.close()
+            _net_ok = True
+            _net_detail = f"HTTPS reachable ({_host})"
+            break
+        except Exception:
+            pass
+    checks.append(("outbound network", _net_ok,
+                   _net_detail if _net_ok else "BLOCKED - fetch/search/crawl will fail"))
+
     # Render
     all_ok = all(ok for _, ok, _ in checks)
     status = ui.ok("all healthy") if all_ok else ui.err("issues found")

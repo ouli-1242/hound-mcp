@@ -86,6 +86,14 @@ _JUNK_PENALTY = ("login", "signin", "sign-in", "signup", "sign-up", "register",
                  "auth", "password", "settings", "preferences")
 
 
+def _is_transient_error(error_str: str) -> bool:
+    """True if the error is transient (worth retrying). Timeout and connection
+    reset may succeed on retry; connection refused and DNS failure will not."""
+    from master_fetch.errors import classify_network_error
+    category, _ = classify_network_error(error_str)
+    return category in ("timeout", "connection_reset", "unknown")
+
+
 class CrawlPage(BaseModel):
     url: str = Field(description="Page URL (final, after redirects). Normalized.")
     depth: int = Field(default=0, description="Hop depth from the start URL (0 = start).")
@@ -488,9 +496,12 @@ async def smart_crawl(
     timeout: int = 30000,
     deadline_ms: int = 120000,
     sitemap: str | bool = False,
+    search: Optional[str] = None,
 ) -> CrawlResponseModel:
     """Best-first same-domain crawl. See module docstring.
 
+    search: filter discovered/crawled URLs by keyword match (URL path + title).
+        Use with discover_only=True for fast URL discovery on large sites.
     sitemap: True = map the site from its sitemap.xml only (one fetch; returns
     the full URL list + lastmod, no BFS, no content). 'auto' = use the sitemap if
     the site has one, else fall back to BFS. False (default) = BFS only. The
@@ -504,9 +515,12 @@ async def smart_crawl(
     deadline_t = t0 + (deadline_ms / 1000.0)
 
     def _err(msg: str, start: str = "") -> CrawlResponseModel:
+        from master_fetch.errors import classify_network_error
+        _, hint = classify_network_error(msg)
         return CrawlResponseModel(start_url=start or url, pages=[], error=msg[:200],
                                   duration_ms=(time() - t0) * 1000,
-                                  summary=f"invalid start URL: {msg[:120]}")
+                                  summary=f"crawl failed: {msg[:120]}",
+                                  next_action=hint)
 
     try:
         url = validate_url(url)
@@ -548,7 +562,7 @@ async def smart_crawl(
                 start_url=start_norm, pages=[], pages_crawled=0,
                 pages_discovered=0, discover_only=True, sitemap_used=False,
                 duration_ms=(time() - t0) * 1000,
-                summary=f"no sitemap.xml found at {root} (robots.txt had no Sitemap directive and /sitemap.xml returned nothing)",
+                summary=f"no sitemap.xml found at {start_norm} (robots.txt had no Sitemap directive and /sitemap.xml returned nothing)",
                 next_action=("No sitemap found. Re-run smart_crawl with sitemap=false (or omit it) "
                              "to use best-first BFS discovery instead."),
             )
@@ -585,7 +599,12 @@ async def smart_crawl(
     sem = asyncio.Semaphore(concurrency)
 
     async def fetch_one(u: str) -> tuple[str, "object", str]:
-        """Fetch one page as HTML. Returns (url, ResponseModel, html_str)."""
+        """Fetch one page as HTML. Returns (url, ResponseModel, html_str).
+
+        Transient errors (timeout, connection_reset) get one automatic retry
+        after a 1s delay. Deterministic errors (connection_refused, dns_failure)
+        are not retried (they will fail again).
+        """
         async with sem:
             try:
                 resp = await server.smart_fetch(
@@ -594,9 +613,28 @@ async def smart_crawl(
                     respect_robots=respect_robots, timeout=timeout,
                 )
             except Exception as e:
-                from master_fetch.server import ResponseModel
-                resp = ResponseModel(url=u, status=-1, content=[""],
-                                     fetcher_used="none", error=str(e)[:200])
+                # Retry once for transient errors (timeout/reset)
+                if _is_transient_error(str(e)):
+                    await asyncio.sleep(1.0)
+                    try:
+                        resp = await server.smart_fetch(
+                            url=u, extraction_type="html", cache_ttl=cache_ttl,
+                            max_content_chars=200000, force_fetcher=force_fetcher,
+                            respect_robots=respect_robots, timeout=timeout,
+                        )
+                    except Exception as e2:
+                        # Lazy import to break circular dependency:
+                        # crawl.py -> server.py (ResponseModel) and
+                        # server.py -> crawl.py (smart_crawl). Both are
+                        # function-level imports so neither module needs the
+                        # other at import time.
+                        from master_fetch.server import ResponseModel
+                        resp = ResponseModel(url=u, status=-1, content=[""],
+                                             fetcher_used="none", error=str(e2)[:200])
+                else:
+                    from master_fetch.server import ResponseModel
+                    resp = ResponseModel(url=u, status=-1, content=[""],
+                                         fetcher_used="none", error=str(e)[:200])
         html = resp.content[0] if resp.content else ""
         return u, resp, html
 
@@ -694,6 +732,16 @@ async def smart_crawl(
             if total_chars >= max_total_chars and not discover_only:
                 truncated_budget = True
 
+            # Browser auto-escalation: if the start page (depth 0) failed with
+            # js_shell or bot_challenge, upgrade force_fetcher to "stealthy" for
+            # all subsequent pages (the site likely needs a real browser).
+            if (depth == 0 and not content_ok and force_fetcher is None
+                    and page.page_type in ("js_shell", "fallback")
+                    and ("bot_challenge" in (page.error or "") or "js_shell" in (page.error or "")
+                         or page.page_type == "js_shell")):
+                force_fetcher = "stealthy"
+                logger.info(f"Crawl: upgrading to stealthy browser (page_type={page.page_type})")
+
             # Discover links for deeper layers (skip in selective mode).
             if not selective and depth < max_depth and html:
                 try:
@@ -760,10 +808,43 @@ async def smart_crawl(
             f"to fetch content for a chosen subset."
         )
 
-    return CrawlResponseModel(
+    # Network failure aggregate diagnosis: when most/all pages failed with
+    # network errors, give the agent a clear classification + actionable hint
+    # instead of leaving next_action empty.
+    if not next_action and pages:
+        network_failures = sum(1 for p in pages if p.status == -1 or p.status == 0)
+        if network_failures > 0 and network_failures >= len(pages) * 0.5:
+            sample_errors = [p.error for p in pages if p.error][:3]
+            from master_fetch.errors import classify_network_error
+            category, hint = classify_network_error(" ".join(sample_errors))
+            next_action = (
+                f"{network_failures}/{len(pages)} pages failed with network errors "
+                f"({category}). {hint} "
+                f"Sample: {sample_errors[0][:100] if sample_errors else 'unknown'}"
+            )
+        elif ok == 0 and pages_crawled > 0:
+            next_action = ("All crawled pages returned no content. The site may be "
+                          "unreachable, require JavaScript, or block automated access. "
+                          "Try smart_fetch on a specific URL for more diagnostics.")
+
+    result = CrawlResponseModel(
         start_url=start_norm, pages=pages, pages_crawled=pages_crawled,
         pages_discovered=pages_discovered, discover_only=discover_only,
         truncated_by_budget=truncated_budget, truncated_by_max_pages=truncated_maxpages,
         truncated_by_time=truncated_time, duration_ms=(time() - t0) * 1000,
         summary=summary, next_action=next_action,
     )
+
+    # Search filter: when search is set, only keep pages whose URL or title
+    # matches any of the search terms. Best with discover_only=True for fast
+    # URL discovery on large sites (like Firecrawl's map + search).
+    if search and result.pages:
+        _terms = search.lower().split()
+        result.pages = [p for p in result.pages if any(
+            t in p.url.lower() or t in (p.title or "").lower()
+            for t in _terms
+        )]
+        result.pages_crawled = len(result.pages)
+        result.summary = f"search='{search}' filtered to {len(result.pages)} URL(s); " + result.summary
+
+    return result

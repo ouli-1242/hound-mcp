@@ -1257,6 +1257,14 @@ class BrowserSession:
                     )
                     await asyncio.sleep(self._retry_delay)
                 else:
+                    # Classify the network error for agent-actionable diagnostics.
+                    # Prepend a category tag so downstream (server.py _agent_hints)
+                    # can identify the failure type without re-parsing.
+                    from master_fetch.errors import classify_network_error
+                    err_str = str(e)
+                    category, _ = classify_network_error(err_str)
+                    if category != "unknown":
+                        raise RuntimeError(f"[{category}] {err_str[:150]}") from e
                     raise
 
         raise RuntimeError(f"Browser fetch failed for {url}")

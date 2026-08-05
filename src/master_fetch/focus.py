@@ -32,11 +32,42 @@ def _tokens(text: str) -> list[str]:
 
 
 def _is_heading(block: str) -> bool:
-    """True if the block's first non-blank line is a markdown heading."""
+    """True if the block's first non-blank line is a valid ATX markdown heading."""
+    return _heading_level(block) <= 6
+
+
+def _heading_level(block: str) -> int:
+    """Return heading level (1-6) or 99 if not a heading.
+
+    ATX headings require a space (or EOL) after the # characters per CommonMark:
+    '# Title' is valid, '#Title' is NOT a heading.
+    """
     for line in block.splitlines():
-        if line.strip():
-            return line.lstrip().startswith("#")
-    return False
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            level = len(stripped) - len(stripped.lstrip("#"))
+            rest = stripped[level:]
+            # Valid ATX: '# ' or '#' alone (empty heading); '#H' is NOT a heading
+            if level <= 6 and (not rest or rest[0] == " "):
+                return level
+            return 99
+        if stripped:
+            return 99
+    return 99
+
+
+def _is_table(block: str) -> bool:
+    """True if the block looks like a markdown table (has | and --- separators)."""
+    lines = [l for l in block.splitlines() if l.strip()]
+    if len(lines) < 2:
+        return False
+    return "|" in lines[0] and "---" in lines[1] if len(lines) > 1 else False
+
+
+def _is_code(block: str) -> bool:
+    """True if the block is a fenced code block."""
+    stripped = block.lstrip()
+    return stripped.startswith("```") or stripped.startswith("    ")
 
 
 def _split_blocks(text: str) -> list[str]:
@@ -113,13 +144,39 @@ def focus_content(
         return s
 
     scores = [score(i) for i in range(n)]
+
+    # ── Pass 2: heading-aware boosting ──────────────────────────────────
+    # When a heading contains query terms, boost all blocks under it (1.5x)
+    # until the next heading at the same or higher level.
+    for i in range(n):
+        if not _is_heading(blocks[i]):
+            continue
+        heading_tokens = set(_tokens(blocks[i]))
+        if not heading_tokens & qterms:
+            continue
+        h_level = _heading_level(blocks[i])
+        scores[i] *= 1.5
+        for j in range(i + 1, n):
+            if _is_heading(blocks[j]) and _heading_level(blocks[j]) <= h_level:
+                break
+            scores[j] *= 1.5
+
+    # ── Pass 3: table/code preservation ─────────────────────────────────
+    # Tables/code containing ANY query term are always kept (high-value).
+    preserved: set = set()
+    for i in range(n):
+        if _is_table(blocks[i]) or _is_code(blocks[i]):
+            if set(block_tokens[i]) & qterms:
+                preserved.add(i)
+
+    # ── Selection ───────────────────────────────────────────────────────
     keep = [i for i in range(n) if scores[i] >= threshold]
     if not keep:
         # Nothing cleared the threshold — keep the closest blocks so the agent
         # has something to judge rather than an empty response.
         keep = sorted(range(n), key=lambda i: scores[i], reverse=True)[:fallback_top]
 
-    keep_set = set(keep)
+    keep_set = set(keep) | preserved
     # Preserve a heading immediately preceding a kept non-heading block.
     for i in keep:
         if i > 0 and _is_heading(blocks[i - 1]) and not _is_heading(blocks[i]):

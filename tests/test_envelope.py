@@ -8,7 +8,7 @@ token in copy/links/scripts) must not classify as paywall; real paywalls
 """
 
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from master_fetch.envelope import (
     detect_page_type, classify_source, compute_freshness, page_type_from_error,
     _paywall_evidence, _parse_date, _count_content_links,
@@ -283,9 +283,14 @@ class TestFreshness:
         assert age == 21
 
     def test_no_fetched_at_falls_back_to_today(self):
-        meta = {"published_time": "2026-07-20T00:00:00Z"}
+        # Date relative to today so the test never rots: no fetched_at means
+        # compute_freshness falls back to now(UTC), so age is exactly the delta.
+        days_ago = 5
+        published = (datetime.now(timezone.utc) - timedelta(days=days_ago)).date().isoformat() + "T00:00:00Z"
+        meta = {"published_time": published}
         age, stale = compute_freshness(meta, "")
-        assert 0 <= age <= 10
+        assert days_ago - 1 <= age <= days_ago + 1
+        assert stale is False
 
 
 # ─── page_type_from_error ─────────────────────────────────────────

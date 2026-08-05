@@ -45,17 +45,15 @@ def _get_metasearch():
 
 # Public default engine pool (the full keyless backend set; order = rough
 # preference). `engines=None` in smart_search uses this via the metasearch.
-DEFAULT_ENGINES = ("duckduckgo", "brave", "mojeek", "yahoo", "yandex",
-                   "startpage", "google", "qwant")
+DEFAULT_ENGINES = ("duckduckgo", "brave", "yahoo", "yandex")
 
 # Index family per backend (by the underlying index/provider, for consensus).
 # A URL returned by duckduckgo AND yahoo is ONE family (both Bing's index);
 # returned by duckduckgo AND brave is TWO families = a stronger authority signal.
 _INDEX_FAMILY = {
     "duckduckgo": "bing", "yahoo": "bing", "bing": "bing",
-    "google": "google", "startpage": "google",
     "brave": "brave", "grokipedia": "grokipedia", "wikipedia": "wikipedia",
-    "mojeek": "mojeek", "yandex": "yandex", "qwant": "qwant",
+    "yandex": "yandex",
 }
 
 _FRESHNESS_TO_TIMELIMIT = {"day": "d", "week": "w", "month": "m", "year": "y"}
@@ -93,13 +91,6 @@ def normalize_url(url: str) -> str:
     host = p.netloc.lower()
     path = p.path.rstrip("/") if len(p.path) > 1 else p.path
     return f"{scheme}://{host}{path}"
-
-
-def _strip_tags(s: str) -> str:
-    if not s:
-        return ""
-    from bs4 import BeautifulSoup
-    return BeautifulSoup(s, "lxml").get_text(" ", strip=True)
 
 
 def _normalize_domain(value: str) -> str:
@@ -255,15 +246,3 @@ async def multi_search(
             reports.append(EngineReport(name=name, error="no results"))
 
     return ranked, reports
-
-
-async def prewarm_search_engines(engines: Optional[list[str]] = None) -> None:
-    """No-op: the metasearch backends are cheap one-shot HTTP clients (primp/httpx)
-    constructed per search; there is no warm session pool to prewarm. Kept for the
-    startup path so callers do not break."""
-    return None
-
-
-async def close_search_engines() -> None:
-    """No-op: nothing to close (no persistent sessions). Kept for shutdown path."""
-    return None

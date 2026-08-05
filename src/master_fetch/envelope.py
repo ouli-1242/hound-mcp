@@ -410,7 +410,7 @@ def page_type_from_error(error: str) -> str:
     e = error.lower()
     if e.startswith("js_shell_detected"):
         return "js_shell"
-    if e.startswith("auth_required") or e.startswith("not_a_pdf") and "auth" in e:
+    if e.startswith("auth_required") or (e.startswith("not_a_pdf") and "auth" in e):
         return "auth_wall"
     if e.startswith("geo_redirect_detected"):
         return "redirect"

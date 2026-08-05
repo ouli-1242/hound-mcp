@@ -159,11 +159,11 @@ def test_tool_definitions(mcp):
     tool_map = {t["name"]: t for t in tools}
 
     fetch_desc = tool_map["mcp_smart_fetch"]["description"]
-    assert "EXTRACTED text" in fetch_desc or "extracted text" in fetch_desc
+    assert "Fetch any URL" in fetch_desc
     assert "offset" in fetch_desc.lower() and "html" in fetch_desc.lower()
 
     offset_desc = tool_map["mcp_smart_fetch"]["inputSchema"]["properties"]["offset"]["description"]
-    assert "total_extracted_chars" in offset_desc
+    assert "next_offset" in offset_desc
 
     assert "cache" in tool_map["mcp_smart_search"]["description"].lower() or \
         "cached" in tool_map["mcp_smart_search"]["description"].lower()

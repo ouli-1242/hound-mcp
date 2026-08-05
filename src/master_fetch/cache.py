@@ -22,7 +22,16 @@ MAX_CACHE_ENTRIES = 10000  # hard cap so a long-lived agent's cache DB can't gro
 
 # Shared DB path cache — avoids re-running PRAGMA on every operation
 _db_initialized: dict[Path, bool] = {}
-_db_init_lock = asyncio.Lock()
+_db_init_lock: asyncio.Lock | None = None
+
+
+def _get_db_lock() -> asyncio.Lock:
+    """Lazy-init the asyncio Lock to avoid issues when module is imported
+    outside a running event loop (e.g. during testing)."""
+    global _db_init_lock
+    if _db_init_lock is None:
+        _db_init_lock = asyncio.Lock()
+    return _db_init_lock
 
 
 def _cache_key(url: str, extraction_type: str, css_selector: str | None = None,
@@ -52,7 +61,7 @@ async def _ensure_db(cache_dir: Path | None = None) -> Path:
     if _db_initialized.get(db_path):
         return db_path
 
-    async with _db_init_lock:
+    async with _get_db_lock():
         # Re-check after acquiring lock (another task may have initialized)
         if _db_initialized.get(db_path):
             return db_path

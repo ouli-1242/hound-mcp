@@ -9,9 +9,10 @@ against real ResponseModel objects. No mocks of the functions themselves.
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 from master_fetch.server import (
+    MasterFetchServer,
     ResponseModel, _is_js_shell, _detect_content_issue, _is_cacheable,
     _agent_hints, _apply_chunking, _is_cloudflare_from_response,
-    _annotate_quality, MAX_CONTENT_CHARS, MIN_CHUNK_CHARS, MAX_BULK_URLS,
+    _annotate_quality, _with_agent_hints, MAX_CONTENT_CHARS, MIN_CHUNK_CHARS, MAX_BULK_URLS,
     _JS_SHELL_SIGNALS, _CF_CHALLENGE_SIGNALS, MAX_RESPONSE_BYTES,
     _browser_deps_available,
 )
@@ -217,7 +218,8 @@ class TestAgentHints:
         result = _make_result(status=404, error="http_error_404")
         summary, next_action, content_ok = _agent_hints(result)
         assert content_ok is False
-        assert "fetch failed" in next_action
+        assert "failed" in next_action.lower()
+        assert next_action  # should have actionable guidance
 
     def test_network_error_summary(self):
         result = _make_result(status=0, error="network_error")
@@ -355,6 +357,231 @@ class TestAnnotateQuality:
         result = _make_result()
         annotated = _annotate_quality(result)
         assert annotated.error == ""
+
+
+# ─── _with_agent_hints (envelope enrichment) ───────────────────────
+
+class TestWithAgentHints:
+    """_with_agent_hints() stamps content_ok, summary, fetched_at, page_type,
+    source_type, next_action on every ResponseModel."""
+
+    def test_sets_summary(self):
+        result = _with_agent_hints(_make_result())
+        assert "200" in result.summary
+        assert "OK" in result.summary
+
+    def test_sets_content_ok_true(self):
+        result = _with_agent_hints(_make_result())
+        assert result.content_ok is True
+
+    def test_sets_fetched_at(self):
+        result = _with_agent_hints(_make_result())
+        assert result.fetched_at != ""
+        assert "T" in result.fetched_at  # ISO-8601 format
+
+    def test_error_result_content_ok_false(self):
+        result = _with_agent_hints(_make_result(status=404, error="http_error_404"))
+        assert result.content_ok is False
+
+    def test_classifies_source(self):
+        result = _with_agent_hints(_make_result(url="https://docs.python.org/3/"))
+        assert result.source_type == "docs-site"
+        assert result.is_official is True
+
+    def test_github_is_official(self):
+        result = _with_agent_hints(_make_result(url="https://github.com/python/cpython"))
+        assert result.source_type == "github"
+        assert result.is_official is True
+
+    def test_unknown_domain_defaults(self):
+        result = _with_agent_hints(_make_result(url="https://random-site-123.com/page"))
+        assert result.source_type == "unknown"
+        assert result.is_official is False
+
+    def test_preserves_existing_metadata(self):
+        result = _with_agent_hints(_make_result(
+            metadata={"title": "My Title", "author": "Test"},
+            links={"citations": [{"url": "https://example.com", "text": "Ex"}]},
+        ))
+        assert result.metadata["title"] == "My Title"
+        assert result.metadata["author"] == "Test"
+        assert len(result.links["citations"]) == 1
+
+    def test_sets_next_action_for_list_page(self):
+        result = _with_agent_hints(_make_result(
+            page_type="list",
+            links={"citations": [{"url": "https://example.com/p1", "text": "P1"}]},
+        ))
+        assert "list page" in result.next_action.lower()
+
+    def test_sets_next_action_for_auth_wall(self):
+        result = _with_agent_hints(_make_result(page_type="auth_wall"))
+        assert "login" in result.next_action.lower()
+
+    def test_summary_uses_extracted_chars_not_raw_size(self):
+        """P2 regression: summary size should use total_extracted_chars,
+        not total_size_bytes (raw HTML body)."""
+        result = _with_agent_hints(_make_result(
+            total_size_bytes=100000,    # 100KB raw HTML
+            total_extracted_chars=15000,  # 15KB extracted text
+            content=["A" * 15000],
+        ))
+        # Size in summary should be ~15KB, not ~100KB
+        # _format_size(15000) = "14.6KB"
+        assert "100" not in result.summary.split("·")[1]  # not 100KB
+
+
+# ─── _finalize_result (annotate + cache + chunk + envelope) ─────────
+
+class TestFinalizeResult:
+    """_finalize_result() orchestrates _annotate_quality + cache + chunking."""
+
+    @pytest.mark.asyncio
+    @patch("master_fetch.server.set_cached", new_callable=AsyncMock)
+    async def test_sets_envelope_fields(self, mock_set_cached):
+        srv = MasterFetchServer(cache_ttl=0)
+        result = _make_result()
+        finalized = await srv._finalize_result(
+            result, "https://example.com", "markdown", None, 0,
+        )
+        assert finalized.summary != ""
+        assert finalized.content_ok is True
+        assert finalized.fetched_at != ""
+        assert finalized.page_type is not None
+        mock_set_cached.assert_not_called()  # cache_ttl=0 → no cache write
+
+    @pytest.mark.asyncio
+    @patch("master_fetch.server.set_cached", new_callable=AsyncMock)
+    async def test_cacheable_writes_cache(self, mock_set_cached):
+        srv = MasterFetchServer(cache_ttl=3600)
+        result = _make_result()
+        finalized = await srv._finalize_result(
+            result, "https://example.com", "markdown", None, 3600,
+        )
+        assert finalized.summary != ""
+        mock_set_cached.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("master_fetch.server.set_cached", new_callable=AsyncMock)
+    async def test_annotate_quality_runs(self, mock_set_cached):
+        """JS shell content should be detected before caching."""
+        srv = MasterFetchServer(cache_ttl=3600)
+        result = _make_result(content=[], status=200)  # empty = JS shell
+        finalized = await srv._finalize_result(
+            result, "https://example.com", "markdown", None, 3600,
+        )
+        assert "js_shell" in finalized.error
+        assert finalized.content_ok is False
+        mock_set_cached.assert_not_called()  # JS shell not cacheable
+
+    @pytest.mark.asyncio
+    @patch("master_fetch.server.set_cached", new_callable=AsyncMock)
+    async def test_chunking_applied(self, mock_set_cached):
+        srv = MasterFetchServer(cache_ttl=0)
+        long = "A" * (MAX_CONTENT_CHARS + 1000)
+        result = _make_result(content=[long])
+        finalized = await srv._finalize_result(
+            result, "https://example.com", "markdown", None, 0,
+        )
+        assert finalized.is_truncated is True
+        assert finalized.next_offset == MAX_CONTENT_CHARS
+        assert finalized.total_extracted_chars == len(long)
+
+
+# ─── bulk_get envelope fields ──────────────────────────────────────
+
+class TestBulkGetEnvelope:
+    """bulk_get() returns ResponseModels with full envelope.
+    Regression test for P0: get()/bulk_get() must call _with_agent_hints()."""
+
+    @staticmethod
+    def _mock_http_response(status=200, body=b"<html><body><p>Test</p></body></html>",
+                            content_type="text/html", url="https://example.com"):
+        """Create a minimal mock HTTP response object."""
+        m = MagicMock()
+        m.status = status
+        m.body = body
+        m.headers = {"content-type": content_type}
+        m.url = url
+        m.encoding = "utf-8"
+        return m
+
+    @pytest.mark.asyncio
+    @patch("master_fetch.fetcher.HTTPSession")
+    async def test_success_path_has_envelope(self, mock_http_session):
+        """A successful bulk_get() result must have content_ok, summary, fetched_at."""
+        mock_session = AsyncMock()
+        mock_session.get.return_value = self._mock_http_response()
+        mock_http_session.return_value.__aenter__.return_value = mock_session
+        mock_http_session.return_value.__aexit__.return_value = None
+
+        bulk = await MasterFetchServer.bulk_get(
+            urls=["https://example.com"],
+            extraction_type="markdown",
+        )
+        assert bulk.total == 1
+        result = bulk.results[0]
+        assert result.summary != "", "summary should be set by _with_agent_hints"
+        assert result.content_ok is True, "content_ok should be True for clean 200"
+        assert result.fetched_at != "", "fetched_at should be ISO timestamp"
+        assert result.url == "https://example.com"
+
+    @pytest.mark.asyncio
+    @patch("master_fetch.fetcher.HTTPSession")
+    async def test_error_path_has_envelope(self, mock_http_session):
+        """A network error from bulk_get() must still have summary + content_ok."""
+        mock_session = AsyncMock()
+        mock_session.get.side_effect = RuntimeError("Connection refused")
+        mock_http_session.return_value.__aenter__.return_value = mock_session
+        mock_http_session.return_value.__aexit__.return_value = None
+
+        bulk = await MasterFetchServer.bulk_get(
+            urls=["https://example.com"],
+            extraction_type="markdown",
+            timeout=5,
+        )
+        assert bulk.total == 1
+        result = bulk.results[0]
+        assert result.summary != "", "error path should still have summary"
+        assert result.content_ok is False, "error path content_ok should be False"
+        assert result.fetched_at != "", "error path should still have fetched_at"
+        assert "Connection refused" in result.error
+
+    @pytest.mark.asyncio
+    @patch("master_fetch.fetcher.HTTPSession")
+    async def test_page_type_detected(self, mock_http_session):
+        """page_type should be detected from HTML content."""
+        mock_session = AsyncMock()
+        mock_session.get.return_value = self._mock_http_response(
+            body=b"<html><body><article><h1>Article</h1><p>Content</p></article></body></html>",
+        )
+        mock_http_session.return_value.__aenter__.return_value = mock_session
+        mock_http_session.return_value.__aexit__.return_value = None
+
+        bulk = await MasterFetchServer.bulk_get(
+            urls=["https://example.com/article"],
+            extraction_type="markdown",
+        )
+        result = bulk.results[0]
+        # <article> tag → page_type should be "article"
+        assert result.page_type == "article", f"expected article, got {result.page_type}"
+
+    @pytest.mark.asyncio
+    @patch("master_fetch.fetcher.HTTPSession")
+    async def test_source_type_from_url(self, mock_http_session):
+        """source_type should be classified from URL."""
+        mock_session = AsyncMock()
+        mock_session.get.return_value = self._mock_http_response(url="https://github.com/user/repo")
+        mock_http_session.return_value.__aenter__.return_value = mock_session
+        mock_http_session.return_value.__aexit__.return_value = None
+
+        bulk = await MasterFetchServer.bulk_get(
+            urls=["https://github.com/user/repo"],
+            extraction_type="markdown",
+        )
+        result = bulk.results[0]
+        assert result.source_type == "github"
+        assert result.is_official is True
 
 
 # ─── Constants and signals ─────────────────────────────────────────
