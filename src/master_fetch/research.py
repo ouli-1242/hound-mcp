@@ -84,6 +84,7 @@ async def smart_research(
     sources: List[ResearchSource] = []
     all_paragraphs: List[str] = []
     seen_paragraphs: set = set()
+    failed_count = 0
 
     for sr in candidates:
         try:
@@ -92,38 +93,44 @@ async def smart_research(
                 max_content_chars=10000, timeout=20000,
             )
             content = "\n".join(page_result.content) if page_result.content else ""
+            # Only surface sources that actually yielded content. A failed /
+            # walled / JS-shell fetch is not a source — listing it with
+            # content_ok=false made agents cite "Not Found" pages.
+            if not page_result.content_ok or not content:
+                failed_count += 1
+                continue
             sources.append(ResearchSource(
                 url=sr.url,
                 title=sr.title,
                 relevant_content=content[:5000],
-                content_ok=page_result.content_ok,
+                content_ok=True,
             ))
 
             # Collect paragraphs for merging
-            if page_result.content_ok and content:
-                for para in content.split("\n\n"):
-                    para_clean = para.strip()
-                    # Dedup by first 100 chars (catches near-duplicates)
-                    key = para_clean[:100].lower()
-                    if para_clean and len(para_clean) > 20 and key not in seen_paragraphs:
-                        seen_paragraphs.add(key)
-                        all_paragraphs.append(para_clean)
-                        if len(all_paragraphs) >= max_paragraphs:
-                            break
+            for para in content.split("\n\n"):
+                para_clean = para.strip()
+                # Dedup by first 100 chars (catches near-duplicates)
+                key = para_clean[:100].lower()
+                if para_clean and len(para_clean) > 20 and key not in seen_paragraphs:
+                    seen_paragraphs.add(key)
+                    all_paragraphs.append(para_clean)
+                    if len(all_paragraphs) >= max_paragraphs:
+                        break
         except Exception:
-            sources.append(ResearchSource(
-                url=sr.url, title=sr.title,
-                relevant_content="", content_ok=False,
-            ))
+            failed_count += 1
 
     elapsed = (_time() - t0) * 1000
+
+    summary = search_result.summary
+    if failed_count:
+        summary = (summary + f" ({failed_count} source(s) skipped: no content / login wall / error)").strip()
 
     return ResearchResponse(
         query=query,
         sources=sources,
         merged_paragraphs=all_paragraphs[:max_paragraphs],
-        total_sources=sum(1 for s in sources if s.content_ok),
+        total_sources=len(sources),
         total_paragraphs=len(all_paragraphs),
-        search_summary=search_result.summary,
+        search_summary=summary,
         duration_ms=elapsed,
     )
