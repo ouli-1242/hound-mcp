@@ -873,6 +873,7 @@ async def metasearch(
             instances[b] = cls(proxy=_PROXY, timeout=int(_SEARCH_DEADLINE), verify=True)
         except Exception as ex:  # construction failure (e.g. primp missing) -> skip
             logger.debug("engine %s init failed: %r", b, ex)
+            status[b] = f"init_error:{type(ex).__name__}"
 
     if not instances and not _BRIGHTDATA_API_KEY:
         proxy_note = f" (proxy in use: {_PROXY})" if _PROXY else ""

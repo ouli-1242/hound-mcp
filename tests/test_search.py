@@ -415,3 +415,90 @@ class TestEngineConfig:
         assert _INDEX_FAMILY["brave"] == "brave"
         # Yandex has its own independent index
         assert _INDEX_FAMILY["yandex"] == "yandex"
+
+
+# ─── Proxy validation (upstream 11.1.9) ───────────────────────────
+
+class TestSearchProxyValidation:
+    def test_whitespace_stripped(self):
+        """Leading/trailing whitespace is stripped so httpx doesn't crash."""
+        import os, importlib
+        os.environ["HOUND_SEARCH_PROXY"] = " http://proxy:8080 "
+        import master_fetch.search_metasearch as m
+        importlib.reload(m)
+        try:
+            assert m._PROXY == "http://proxy:8080"
+        finally:
+            os.environ.pop("HOUND_SEARCH_PROXY", None)
+            importlib.reload(m)
+
+    def test_whitespace_only_nulled(self):
+        """Whitespace-only proxy becomes None, not a crash-inducing string."""
+        import os, importlib
+        os.environ["HOUND_SEARCH_PROXY"] = "   "
+        import master_fetch.search_metasearch as m
+        importlib.reload(m)
+        try:
+            assert m._PROXY is None
+        finally:
+            os.environ.pop("HOUND_SEARCH_PROXY", None)
+            importlib.reload(m)
+
+    def test_invalid_scheme_rejected(self):
+        """Unknown scheme (not http/https/socks5/socks5h) is rejected."""
+        import os, importlib
+        os.environ["HOUND_SEARCH_PROXY"] = "garbage://proxy"
+        import master_fetch.search_metasearch as m
+        importlib.reload(m)
+        try:
+            assert m._PROXY is None
+        finally:
+            os.environ.pop("HOUND_SEARCH_PROXY", None)
+            importlib.reload(m)
+
+    def test_valid_socks5_accepted(self):
+        """socks5 scheme is accepted (primp supports it natively)."""
+        import os, importlib
+        os.environ["HOUND_SEARCH_PROXY"] = "socks5://192.0.2.1:1080"
+        import master_fetch.search_metasearch as m
+        importlib.reload(m)
+        try:
+            assert m._PROXY == "socks5://192.0.2.1:1080"
+        finally:
+            os.environ.pop("HOUND_SEARCH_PROXY", None)
+            importlib.reload(m)
+
+    def test_no_proxy_env(self):
+        """Unset env var -> None (direct connection)."""
+        import os, importlib
+        os.environ.pop("HOUND_SEARCH_PROXY", None)
+        import master_fetch.search_metasearch as m
+        importlib.reload(m)
+        assert m._PROXY is None
+
+    def test_all_engines_construction_failure_raises(self):
+        """If every engine fails to construct (bad deps, etc), raise an error
+        instead of silently returning 0 results."""
+        import asyncio
+        import master_fetch.search_metasearch as m
+
+        class BrokenEngine:
+            disabled = False
+            def __init__(self, **kwargs):
+                raise RuntimeError("simulated construction failure")
+
+        original = dict(m._TEXT_ENGINES)
+        original_bd_key = m._BRIGHTDATA_API_KEY
+        m._BRIGHTDATA_API_KEY = ""  # disable the brightdata fallback for this test
+        for name in m._TEXT_ENGINES:
+            m._TEXT_ENGINES[name] = type(
+                f"Broken{name}", (BrokenEngine,),
+                {"name": name, "disabled": False, "priority": 1.0}
+            )
+        try:
+            with pytest.raises(m.MetaSearchException, match="No search engines could start"):
+                asyncio.run(m.metasearch("test", max_results=3))
+        finally:
+            m._TEXT_ENGINES.clear()
+            m._TEXT_ENGINES.update(original)
+            m._BRIGHTDATA_API_KEY = original_bd_key
