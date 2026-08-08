@@ -145,7 +145,6 @@ if TYPE_CHECKING:
     from hound_mcp.fetcher import Response as _HoundResponse
     from hound_mcp.browser import StealthyBrowser
     from hound_mcp.search import SearchResponseModel
-    from mcp.server.fastmcp import Image
     from mcp.types import ImageContent, TextContent
 
 from hound_mcp.cache import get_cached, set_cached, clear_cache, clear_all_cache, DEFAULT_TTL
@@ -1801,9 +1800,13 @@ class MasterFetchServer:
         if "bytes" not in captured:
             raise RuntimeError(f"Failed to capture screenshot for {url}")
 
-        from mcp.server.fastmcp import Image  # lazy: fastmcp is ~1s to import, only needed for screenshots
-        from mcp.types import TextContent  # lazy: mcp.types is ~1s; only needed for screenshot output
-        image = Image(data=captured["bytes"], format=image_type).to_image_content()
+        import base64
+        from mcp.types import ImageContent, TextContent
+        image = ImageContent(
+            type="image",
+            data=base64.b64encode(captured["bytes"]).decode(),
+            mime_type=f"image/{image_type.lower()}",
+        )
         return [image, TextContent(type="text", text=captured["url"])]
 
     # ─── HTTP Fetcher (curl_cffi) ─────────────────────────────────
@@ -3204,36 +3207,34 @@ class MasterFetchServer:
         other HTTP MCP clients connect to directly, no proxy needed. The legacy
         SSE transport was removed (deprecated in the spec)."""
         from mcp.server import Server
-        from mcp.types import Tool, TextContent
+        from mcp.types import CallToolResult, CallToolRequestParams, ListToolsResult, Tool, TextContent
 
-        server = Server(name="Hound", version=__version__)
-        # Connect-time orientation: clients inject this into the agent context
-        # once on initialize (the MCP `instructions` field).
-        server.instructions = HOUND_INSTRUCTIONS
-        server.website_url = "https://github.com/ouli-1242/hound-mcp"
+        async def list_tools(ctx, params) -> ListToolsResult:
+            return ListToolsResult(tools=[Tool(**td) for td in self._TOOL_DEFS])
 
-        # ── list_tools: return hand-crafted minimal definitions ──────
-        @server.list_tools()
-        async def list_tools():
-            return [Tool(**td) for td in self._TOOL_DEFS]
-
-        # ── call_tool: dispatch to existing methods ─────────────────
-        @server.call_tool(validate_input=False)
-        async def call_tool(name: str, arguments: dict):
-            from mcp.types import CallToolResult
+        async def call_tool(ctx, params: CallToolRequestParams) -> CallToolResult:
             try:
-                result = await self._dispatch(name, arguments)
+                result = await self._dispatch(params.name, params.arguments or {})
                 # _dispatch returns (content_list, structured_dict) or just content_list
                 if isinstance(result, tuple):
                     content_list, structured = result
-                    return CallToolResult(content=content_list, structuredContent=structured)
+                    return CallToolResult(content=content_list, structured_content=structured)
                 return CallToolResult(content=result)
             except Exception as e:
                 error_text = json.dumps({"error": redact_api_key(str(e)[:300])})
                 return CallToolResult(
                     content=[TextContent(type="text", text=error_text)],
-                    isError=True,
+                    is_error=True,
                 )
+
+        server = Server(
+            "Hound",
+            version=__version__,
+            instructions=HOUND_INSTRUCTIONS,
+            website_url="https://github.com/ouli-1242/hound-mcp",
+            on_list_tools=list_tools,
+            on_call_tool=call_tool,
+        )
 
         if not http:
             import anyio
