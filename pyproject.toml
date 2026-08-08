@@ -66,9 +66,9 @@ all = [
 ]
 
 [project.urls]
-Repository = "https://github.com/dondai1234/master-fetch"
-Issues = "https://github.com/dondai1234/master-fetch/issues"
-Changelog = "https://github.com/dondai1234/master-fetch/blob/master/CHANGELOG.md"
+Repository = "https://github.com/ouli-1242/hound-mcp"
+Issues = "https://github.com/ouli-1242/hound-mcp/issues"
+Changelog = "https://github.com/ouli-1242/hound-mcp/blob/master/CHANGELOG.md"
 
 [project.scripts]
 hound = "master_fetch.cli:main"

@@ -642,7 +642,7 @@ users all 6 Hound tools as native Pi tools with TUI rendering. Install:
 
 ```
 pip install hound-mcp[all]
-pi install git:github.com/dondai1234/master-fetch@v10.3.0
+pi install git:github.com/ouli-1242/hound-mcp@v10.3.0
 ```
 
 The extension spawns Hound as a singleton MCP subprocess (prewarmed at session

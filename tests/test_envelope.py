@@ -185,7 +185,7 @@ class TestPaywallEvidence:
 class TestClassifySource:
 
     def test_github_is_official(self):
-        st, off = classify_source("https://github.com/dondai1234/master-fetch")
+        st, off = classify_source("https://github.com/ouli-1242/hound-mcp")
         assert st == "github" and off is True
 
     def test_github_raw_is_official(self):

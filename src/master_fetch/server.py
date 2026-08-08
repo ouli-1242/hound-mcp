@@ -3210,7 +3210,7 @@ class MasterFetchServer:
         # Connect-time orientation: clients inject this into the agent context
         # once on initialize (the MCP `instructions` field).
         server.instructions = HOUND_INSTRUCTIONS
-        server.website_url = "https://github.com/dondai1234/master-fetch"
+        server.website_url = "https://github.com/ouli-1242/hound-mcp"
 
         # ── list_tools: return hand-crafted minimal definitions ──────
         @server.list_tools()
@@ -3439,7 +3439,7 @@ def _help_epilog() -> str:
         f"  {ui.cyan('hound -v')}           {ui.dim('version + update check')}",
         f"  {ui.cyan('hound -u')}           {ui.dim('update to the latest version')}",
         "",
-        ui.dim("docs:") + "  " + ui.cyan("https://github.com/dondai1234/master-fetch"),
+        ui.dim("docs:") + "  " + ui.cyan("https://github.com/ouli-1242/hound-mcp"),
     ])
 
 

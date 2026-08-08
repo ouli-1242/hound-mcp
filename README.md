@@ -135,7 +135,7 @@ playwright install chromium
 ### 从源码安装
 
 ```bash
-git clone https://github.com/dondai1234/master-fetch.git
+git clone https://github.com/ouli-1242/hound-mcp.git
 cd master-fetch
 
 # 开发模式（改代码立即生效，但移动目录会失效）
