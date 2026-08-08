@@ -22,10 +22,18 @@ import pytest
 
 from master_fetch.search_proxy import (
     ProxyPool, _validate_proxy, _read_config_file, _read_env_var,
-    load_proxies, save_proxies, add_proxy, remove_proxy, clear_proxies,
-    list_proxies, redact_proxy, get_proxy_pool, get_next_proxy, reset_pool,
-    MAX_PROXIES, PROXY_COOLDOWN,
+    load_proxies, get_proxy_pool, get_next_proxy,
+    MAX_PROXIES,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_pool_singleton():
+    """Reset the module-level proxy pool before and after each test."""
+    import master_fetch.search_proxy as _sp
+    _sp._pool = None
+    yield
+    _sp._pool = None
 
 
 # ─── ProxyPool rotation ────────────────────────────────────────────
@@ -107,6 +115,73 @@ class TestProxyPoolHealth:
         assert statuses[1]["cooled"] is False
 
 
+# ─── Proxy dead-detection + health probe ───────────────────────────
+
+class TestProxyDeadDetection:
+
+    def test_skips_dead_proxy_when_alive_exists(self):
+        pool = ProxyPool(["http://p1:80", "http://p2:80"])
+        for _ in range(ProxyPool.MAX_CONSECUTIVE_FAILS):
+            pool.mark_failed("http://p1:80")
+        # p1 is dead -> only p2 is handed out
+        assert pool.get_proxy() == "http://p2:80"
+        assert pool.get_proxy() == "http://p2:80"
+
+    def test_success_revives_proxy(self):
+        pool = ProxyPool(["http://p1:80", "http://p2:80"])
+        for _ in range(ProxyPool.MAX_CONSECUTIVE_FAILS):
+            pool.mark_failed("http://p1:80")
+        assert pool.get_proxy() == "http://p2:80"
+        pool.mark_success("http://p1:80")
+        assert pool.get_proxy() == "http://p1:80"
+
+    def test_all_dead_falls_back_to_first(self):
+        # Stale probes shouldn't hard-block a call that might succeed.
+        pool = ProxyPool(["http://p1:80", "http://p2:80"])
+        for p in ("http://p1:80", "http://p2:80"):
+            pool._stats[p]["consecutive_fails"] = ProxyPool.MAX_CONSECUTIVE_FAILS
+        assert pool.get_proxy() in ("http://p1:80", "http://p2:80")
+
+    def test_status_reports_dead_flag(self):
+        pool = ProxyPool(["http://p1:80"])
+        for _ in range(ProxyPool.MAX_CONSECUTIVE_FAILS):
+            pool.mark_failed("http://p1:80")
+        statuses = pool.status()
+        assert statuses[0]["dead"] is True
+        assert statuses[0]["fail"] == ProxyPool.MAX_CONSECUTIVE_FAILS
+
+    @pytest.mark.asyncio
+    async def test_health_check_revives_and_marks_dead(self, monkeypatch):
+        pool = ProxyPool(["http://alive:80", "http://dead:80"])
+
+        class FakeResp:
+            status = 200
+
+        class FakeSession:
+            def __init__(self, proxy=None, **kwargs):
+                self._proxy = proxy
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, url, follow_redirects="safe"):
+                if self._proxy == "http://alive:80":
+                    return FakeResp()
+                raise ConnectionError("refused")
+
+        monkeypatch.setattr("master_fetch.fetcher.HTTPSession", FakeSession)
+
+        results = await pool.health_check()
+        assert results["http://alive:80"] is True
+        assert results["http://dead:80"] is False
+        # alive proxy revived (fail streak reset), dead one not marked dead yet
+        assert pool._is_dead("http://alive:80") is False
+        assert pool.get_proxy() == "http://alive:80"
+
+
 # ─── Validation ────────────────────────────────────────────────────
 
 class TestProxyValidation:
@@ -142,71 +217,6 @@ class TestProxyValidation:
     def test_rejects_invalid_scheme(self):
         assert _validate_proxy("ftp://1.2.3.4:21") is None
         assert _validate_proxy("1.2.3.4:8080") is None
-
-
-# ─── Config file management ────────────────────────────────────────
-
-class TestConfigFile:
-
-    @pytest.fixture
-    def temp_config(self, tmp_path, monkeypatch):
-        config_file = tmp_path / "search_proxies.json"
-        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
-        return config_file
-
-    def test_add_and_list_proxy(self, temp_config):
-        add_proxy("http://1.2.3.4:8080")
-        assert list_proxies() == ["http://1.2.3.4:8080"]
-        assert temp_config.exists()
-        data = json.loads(temp_config.read_text())
-        assert data == {"proxies": ["http://1.2.3.4:8080"]}
-
-    def test_add_multiple_proxies(self, temp_config):
-        add_proxy("http://p1:80")
-        add_proxy("socks5://p2:1080")
-        assert list_proxies() == ["http://p1:80", "socks5://p2:1080"]
-
-    def test_add_duplicate_rejected(self, temp_config):
-        add_proxy("http://1.2.3.4:8080")
-        with pytest.raises(ValueError, match="already configured"):
-            add_proxy("http://1.2.3.4:8080")
-
-    def test_add_invalid_rejected(self, temp_config):
-        with pytest.raises(ValueError, match="Invalid proxy"):
-            add_proxy("ftp://bad:21")
-
-    def test_add_over_max_rejected(self, temp_config):
-        for i in range(MAX_PROXIES):
-            add_proxy(f"http://10.0.0.{i}:8080")
-        with pytest.raises(ValueError, match="Proxy pool is full"):
-            add_proxy("http://10.0.0.99:8080")
-
-    def test_remove_by_index(self, temp_config):
-        add_proxy("http://p1:80")
-        add_proxy("http://p2:80")
-        add_proxy("http://p3:80")
-        removed = remove_proxy(1)
-        assert removed == "http://p2:80"
-        assert list_proxies() == ["http://p1:80", "http://p3:80"]
-
-    def test_remove_out_of_range(self, temp_config):
-        add_proxy("http://p1:80")
-        with pytest.raises(IndexError, match="out of range"):
-            remove_proxy(5)
-
-    def test_remove_empty_list(self, temp_config):
-        with pytest.raises(IndexError, match="No proxies"):
-            remove_proxy(0)
-
-    def test_clear_proxies(self, temp_config):
-        add_proxy("http://p1:80")
-        add_proxy("http://p2:80")
-        count = clear_proxies()
-        assert count == 2
-        assert list_proxies() == []
-
-    def test_clear_empty(self, temp_config):
-        assert clear_proxies() == 0
 
 
 # ─── Env var parsing ───────────────────────────────────────────────
@@ -276,20 +286,6 @@ class TestProxyMerging:
         assert len(result) == MAX_PROXIES
 
 
-# ─── Redaction ─────────────────────────────────────────────────────
-
-class TestRedaction:
-
-    def test_redact_with_credentials(self):
-        assert redact_proxy("http://user:pass@1.2.3.4:8080") == "http://***:***@1.2.3.4:8080"
-
-    def test_no_credentials_not_redacted(self):
-        assert redact_proxy("http://1.2.3.4:8080") == "http://1.2.3.4:8080"
-
-    def test_socks5_with_credentials(self):
-        assert redact_proxy("socks5://user:pass@5.6.7.8:1080") == "socks5://***:***@5.6.7.8:1080"
-
-
 # ─── Pool singleton ────────────────────────────────────────────────
 
 class TestPoolSingleton:
@@ -297,7 +293,6 @@ class TestPoolSingleton:
     def test_get_proxy_pool_none_when_empty(self, monkeypatch, tmp_path):
         monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: tmp_path / "none.json")
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
-        reset_pool()
         assert get_proxy_pool() is None
         assert get_next_proxy() is None
 
@@ -306,7 +301,6 @@ class TestPoolSingleton:
         config_file.write_text(json.dumps({"proxies": ["http://p1:80"]}))
         monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
-        reset_pool()
         pool1 = get_proxy_pool()
         pool2 = get_proxy_pool()
         assert pool1 is pool2
@@ -320,7 +314,6 @@ class TestPoolSingleton:
         config_file.write_text(json.dumps({"proxies": ["http://p1:80", "http://p2:80", "http://p3:80"]}))
         monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
-        reset_pool()
         assert get_next_proxy() == "http://p1:80"
         assert get_next_proxy() == "http://p2:80"
         assert get_next_proxy() == "http://p3:80"
@@ -334,7 +327,6 @@ class TestMetasearchProxyIntegration:
     def test_metasearch_uses_no_proxy_when_unconfigured(self, monkeypatch, tmp_path):
         monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: tmp_path / "none.json")
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
-        reset_pool()
         from master_fetch.search_metasearch import _get_search_proxy
         assert _get_search_proxy() is None
 
@@ -343,7 +335,6 @@ class TestMetasearchProxyIntegration:
         config_file.write_text(json.dumps({"proxies": ["http://p1:80", "http://p2:80"]}))
         monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
-        reset_pool()
         from master_fetch.search_metasearch import _get_search_proxy
         assert _get_search_proxy() == "http://p1:80"
         assert _get_search_proxy() == "http://p2:80"
@@ -354,7 +345,6 @@ class TestMetasearchProxyIntegration:
         config_file.write_text(json.dumps({"proxies": ["http://p1:80"]}))
         monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
-        reset_pool()
         import master_fetch.search_metasearch as sm
         sm._PROXY = "stale_value"
         proxy = sm._get_search_proxy()
@@ -366,7 +356,6 @@ class TestMetasearchProxyIntegration:
         config_file.write_text(json.dumps({"proxies": ["http://p1:80"]}))
         monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
-        reset_pool()
         pool = get_proxy_pool()
         pool.mark_failed("http://p1:80")
         from master_fetch.search_metasearch import _get_search_proxy
@@ -384,7 +373,6 @@ class TestCrawlProxyIntegration:
         config_file.write_text(json.dumps({"proxies": ["http://crawl-p1:80", "http://crawl-p2:80"]}))
         monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
-        reset_pool()
 
         received_proxies = []
 
@@ -407,13 +395,11 @@ class TestCrawlProxyIntegration:
 
         assert len(received_proxies) > 0
         assert received_proxies[0] in ["http://crawl-p1:80", "http://crawl-p2:80"]
-        reset_pool()
 
     def test_crawl_no_proxies_passes_none(self, monkeypatch, tmp_path):
         """When no proxies configured, crawl passes None (direct connection)."""
         monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: tmp_path / "none.json")
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
-        reset_pool()
 
         received_proxies = []
 
@@ -435,7 +421,6 @@ class TestCrawlProxyIntegration:
         ))
 
         assert all(p is None for p in received_proxies)
-        reset_pool()
 
     def test_crawl_rotates_proxies_across_pages(self, monkeypatch, tmp_path):
         """Multiple crawl page fetches should rotate through different proxies."""
@@ -445,7 +430,6 @@ class TestCrawlProxyIntegration:
         ]}))
         monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
-        reset_pool()
 
         received_proxies = []
 
@@ -471,4 +455,3 @@ class TestCrawlProxyIntegration:
         assert len(received_proxies) >= 2
         unique_proxies = set(received_proxies)
         assert len(unique_proxies) > 1, f"Expected rotation but got {received_proxies}"
-        reset_pool()

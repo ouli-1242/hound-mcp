@@ -185,35 +185,6 @@ class Response:
         matches = sel(self._root)
         return [ElementWrapper(m, self._url) for m in matches]
 
-    @property
-    def first(self) -> "Response":
-        """Scrapling compat: .css('body').first returns self-like or empty."""
-        return self
-
-    def get_all_text(self, strip=False, ignore_tags=()) -> str:
-        """Get all text content, optionally stripping whitespace and ignoring tags."""
-        self._ensure_parsed()
-        if self._root is None:
-            return ""
-        try:
-            # Collect text from all elements, skipping ignored tags
-            tags_to_skip = set(ignore_tags) if ignore_tags else set()
-            texts = []
-            for el in self._root.iter():
-                tag = el.tag if isinstance(el.tag, str) else ""
-                if tag in tags_to_skip:
-                    continue
-                if el.text:
-                    texts.append(el.text)
-                if el.tail:
-                    texts.append(el.tail)
-            result = " ".join(texts)
-            if strip:
-                result = result.strip()
-            return result
-        except Exception:
-            return self.content
-
 
 # ─── Browser response builder ─────────────────────────────────────────────────
 

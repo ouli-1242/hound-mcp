@@ -124,6 +124,9 @@ def _extract_by_selector(root, selector: str, field_type: str) -> Any:
 
         if field_type == "array":
             return [text for el in elements if (text := _element_text(el))]
+        elif field_type == "count":
+            # Count of matching elements, not their text.
+            return len(elements)
         else:
             # Return first match text
             return _element_text(elements[0]) or None

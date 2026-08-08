@@ -29,7 +29,7 @@ SUPPORTED_EXTENSIONS = {".html", ".htm", ".xhtml", ".docx", ".xlsx", ".csv", ".p
 MAX_PARSE_FILE_SIZE = 50 * 1024 * 1024
 
 
-def parse_file(file_path: str, extraction_type: str = "markdown") -> tuple[str, str]:
+def parse_file(file_path: str) -> tuple[str, str]:
     """Parse a local file to Markdown.
 
     Returns (content: str, error: str). On success error is empty.

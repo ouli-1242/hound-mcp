@@ -7,8 +7,7 @@ from scrapling (it's standard Playwright page manipulation, ~80 lines).
 Architecture:
 - StealthyBrowser: anti-detect browser with fingerprinting, stealth args,
   Cloudflare solver, resource blocking, page pooling
-- DynamicBrowser: simpler JS-rendering browser (same engine, no stealth args)
-- Both: async context manager (async with), .start(), .close(), .fetch()
+- Async context manager (async with), .start(), .close(), .fetch()
 """
 
 from __future__ import annotations
@@ -844,7 +843,6 @@ class BrowserSession:
         cookies: Optional[List[Dict]] = None,
         useragent: Optional[str] = None,
         network_idle: bool = False,
-        block_ads: bool = True,
         disable_resources: bool = False,
         extra_headers: Optional[Dict[str, str]] = None,
         google_search: bool = True,
@@ -852,7 +850,6 @@ class BrowserSession:
         real_chrome: bool = True,
         wait_selector: Optional[str] = None,
         wait_selector_state: str = "attached",
-        max_pages: int = 1,
         retries: int = 1,
         retry_delay: float = 1.0,
         # Stealthy-specific
@@ -874,7 +871,6 @@ class BrowserSession:
         self._cookies = cookies
         self._useragent = useragent
         self._network_idle = network_idle
-        self._block_ads = block_ads
         self._disable_resources = disable_resources
         self._extra_headers = extra_headers
         self._google_search = google_search
@@ -882,7 +878,6 @@ class BrowserSession:
         self._real_chrome = real_chrome
         self._wait_selector = wait_selector
         self._wait_selector_state = wait_selector_state
-        self._max_pages = max_pages
         self._retries = retries
         self._retry_delay = retry_delay
         self._hide_canvas = hide_canvas
@@ -1313,19 +1308,6 @@ class StealthyBrowser(BrowserSession):
     @property
     def _is_stealthy(self) -> bool:
         return True
-
-
-class DynamicBrowser(BrowserSession):
-    """Standard JS-rendering browser session.
-
-    Simpler than stealthy: no stealth args, no Cloudflare solver.
-    Used for pages that need JavaScript rendering but don't have
-    anti-bot protection.
-    """
-
-    @property
-    def _is_stealthy(self) -> bool:
-        return False
 
 
 # ─── Browser availability check ───────────────────────────────────────────────

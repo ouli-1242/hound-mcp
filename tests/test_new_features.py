@@ -1,9 +1,8 @@
-"""Tests for new features: smart_research, fetch_content, schema auto, batch structured extraction."""
+"""Tests for new features: fetch_content, schema auto, batch structured extraction."""
 
 import pytest
 
 from master_fetch.structured import extract_structured, _extract_auto
-from master_fetch.research import ResearchResponse, ResearchSource
 
 
 # ─── Schema auto mode ─────────────────────────────────────────────────────────
@@ -111,36 +110,6 @@ class TestFetchContentSchema:
         resp = SearchResponseModel(query="test", results=[])
         assert hasattr(resp, "fetched_pages")
         assert resp.fetched_pages == []
-
-
-# ─── smart_research ───────────────────────────────────────────────────────────
-
-class TestSmartResearch:
-    """Test research module components."""
-
-    def test_research_response_model(self):
-        resp = ResearchResponse(query="test query")
-        assert resp.query == "test query"
-        assert resp.sources == []
-        assert resp.merged_paragraphs == []
-        assert resp.total_sources == 0
-
-    def test_research_source_model(self):
-        src = ResearchSource(url="https://example.com", title="Example", content_ok=True)
-        assert src.url == "https://example.com"
-        assert src.relevant_content == ""
-
-    def test_research_tool_registered(self):
-        """Verify smart_research is in _TOOL_DEFS."""
-        from master_fetch.server import MasterFetchServer
-        tool_names = [t["name"] for t in MasterFetchServer._TOOL_DEFS]
-        assert "smart_research" in tool_names
-
-    def test_research_method_exists(self):
-        """Verify MasterFetchServer has smart_research method."""
-        from master_fetch.server import MasterFetchServer
-        assert hasattr(MasterFetchServer, "smart_research")
-        assert callable(getattr(MasterFetchServer, "smart_research"))
 
 
 # ─── source_type detection ────────────────────────────────────────────────────

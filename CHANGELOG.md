@@ -2,6 +2,64 @@
 
 ## [Unreleased]
 
+### New: feed_fetch + resolve_url tools, proxy health detection
+
+Three additions for the single-user research workflow:
+
+- **`feed_fetch`** (new `feed.py`): batch RSS 2.0 / Atom fetching. Returns each
+  feed's latest entries (title/url/published/summary, newest-first), per-source
+  error isolation (a dead feed never fails the batch), no caching (feeds are
+  inherently fresh). Follow changelogs/release notes/news feeds directly.
+- **`resolve_url`**: follow redirects without downloading the body. Returns
+  final_url + status + content_type. Pre-screen short links and redirect-heavy
+  search results before deciding what to fetch. SSRF-validated.
+- **Proxy health detection** (`search_proxy.py`): proxies with >= 3 consecutive
+  failures are treated as dead and skipped while a live one exists (all-dead
+  still falls back to the first proxy rather than hard-blocking). New
+  `ProxyPool.health_check()` probes every proxy concurrently (bounded 5-way);
+  the first pool creation kicks off a background probe so dead proxies are
+  detected without blocking the first search. `status()` reports per-proxy
+  success/fail counts + dead flag.
+
+### Slim-down: single-user pruning + dead-code cleanup (~5k lines removed)
+
+Private-use cleanup pass (not upstreamed). Removed scrapling-compat residue,
+defensive/generalization code that a single user doesn't need, and duplicated
+implementations:
+
+- **Removed tools:** `smart_monitor` (page-change polling) and `smart_research`
+  (rule-driven research pipeline) — agents compose `smart_search` + `smart_fetch`
+  directly. `monitor.py`, `research.py` and their tests deleted.
+- **Removed dynamic (Playwright) tier:** `fetch`/`bulk_fetch`, `DynamicBrowser`,
+  `open_session(session_type="dynamic")`, `_auto_dynamic_*` state. Only
+  http + stealthy remain.
+- **Removed robots.txt compliance:** `robots.py`, `respect_robots` param,
+  `is_allowed`/`clear_robots_cache`. Sitemap discovery (sitemap.py) kept —
+  it self-fetches robots.txt and doesn't depend on robots.py.
+- **Removed updater CLI family:** `hound --doctor/--rollback/--reinstall`,
+  `cleanup_old_launcher`. Kept `check_version`/`-v`/`-u` (`do_update` +
+  its repair safety net).
+- **Removed proxy CLI:** `hound proxy add/list/remove/clear`, config-file
+  management (`add_proxy`/`remove_proxy`/`clear_proxies`/`list_proxies`/
+  `save_proxies`/`redact_proxy`), `reset_pool`. Kept rotation core
+  (`get_proxy_pool`/`get_next_proxy`/`ProxyPool`).
+- **Removed dead code:** `extractor.extract_html_content`/`extract_text_content`/
+  `_strip_noise_tags`, `fetcher.Response.first`/`get_all_text`, `ArticleModel`,
+  zombie search engines (Bing class, `_unwrap_bing_url`, `_google_ua`),
+  `_reset_circuit_breaker`, `_PrimpClient.post`, `_stop_hound_cmd`,
+  `BrowserSession._block_ads`/`_max_pages` (stored but never read),
+  unused params (`extract_content.main_content_only`, `parse_file.extraction_type`).
+- **Consolidated duplicates:** removed `server._http_with_retry` (single retry
+  layer inside `fetcher.HTTPSession`; was 3× nested → up to 12 attempts),
+  removed `_raw_extract` third fallback (4th copy of the script/style-strip
+  regex; `_fallback_extract` covers it), removed module-level `PROXY_COOLDOWN`
+  duplicate.
+- **Cache schema:** added `scope` column (fetch/search) so search.py no longer
+  stuffs serialized params into the `extraction_type` slot. Existing cache
+  entries are invalidated (single-user, acceptable).
+
+Tests: 641 → 592 (49 tests removed with their features), all green.
+
 ## [11.1.8] - 2026-07-22
 
 ### Fixed: MCP server fails to start with -32001 REQUEST_TIMEOUT (issue #11)

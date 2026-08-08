@@ -107,19 +107,6 @@ class TestCSSSelectors:
         with pytest.raises(SelectorSyntaxError):
             r.css("div > >")
 
-    def test_get_all_text_extracts_text(self):
-        html = b'<html><body><p>Hello</p><p>World</p></body></html>'
-        r = Response(url="https://x.com", body=html, status=200)
-        text = r.get_all_text()
-        assert "Hello" in text and "World" in text
-
-    def test_get_all_text_with_ignore_tags(self):
-        html = b'<html><body><script>evil()</script><p>visible</p></body></html>'
-        r = Response(url="https://x.com", body=html, status=200)
-        text = r.get_all_text(ignore_tags={"script"})
-        assert "evil" not in text
-        assert "visible" in text
-
     def test_element_wrapper_url_propagated(self):
         html = b'<html><body><div class="x">Y</div></body></html>'
         r = Response(url="https://example.com/page", body=html, status=200)

@@ -28,7 +28,6 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 MAX_PROXIES = 20
-PROXY_COOLDOWN = 60.0  # seconds — same as engine circuit breaker
 _VALID_SCHEMES = ("http", "https", "socks5", "socks5h")
 
 
@@ -103,70 +102,12 @@ def load_proxies() -> list[str]:
     return merged[:MAX_PROXIES]
 
 
-def save_proxies(proxies: list[str]) -> None:
-    """Write proxies to the config file. Creates ~/.hound/ if needed."""
-    path = _config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    validated = [p for p in (_validate_proxy(x) for x in proxies) if p]
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"proxies": validated}, f, indent=2)
 
-
-def add_proxy(proxy: str) -> int:
-    """Add a proxy to the config file. Returns total count after adding.
-
-    Raises ValueError if the proxy is invalid or the pool is full.
-    """
-    p = _validate_proxy(proxy)
-    if not p:
-        raise ValueError(
-            f"Invalid proxy '{proxy}'. Expected format: http://ip:port, "
-            f"https://ip:port, socks5://ip:port (or with user:pass@)."
-        )
-    existing = _read_config_file()
-    if p in existing:
-        raise ValueError(f"Proxy already configured: {p}")
-    if len(existing) >= MAX_PROXIES:
-        raise ValueError(f"Proxy pool is full ({MAX_PROXIES} max). Remove one first.")
-    existing.append(p)
-    save_proxies(existing)
-    return len(existing)
-
-
-def remove_proxy(index: int) -> str:
-    """Remove a proxy by index from the config file. Returns the removed proxy.
-
-    Raises IndexError if the index is out of range.
-    """
-    existing = _read_config_file()
-    if not existing:
-        raise IndexError("No proxies configured.")
-    if index < 0 or index >= len(existing):
-        raise IndexError(f"Index {index} out of range (0-{len(existing) - 1}).")
-    removed = existing.pop(index)
-    save_proxies(existing)
-    return removed
-
-
-def clear_proxies() -> int:
-    """Remove all proxies from the config file. Returns count removed."""
-    existing = _read_config_file()
-    if existing:
-        save_proxies([])
-    return len(existing)
-
-
-def list_proxies() -> list[str]:
-    """List all proxies from the config file (not env var)."""
-    return _read_config_file()
-
-
-def redact_proxy(proxy: str) -> str:
+def _redact(proxy: str) -> str:
     """Redact credentials in a proxy URL for display."""
     try:
         parsed = urlparse(proxy)
         if parsed.username or parsed.password:
-            # Replace user:pass@ with ***@
             netloc = f"***:***@{parsed.hostname}"
             if parsed.port:
                 netloc += f":{parsed.port}"
@@ -180,48 +121,103 @@ class ProxyPool:
     """Manages multiple proxies with round-robin rotation + health tracking.
 
     Round-robin per search call: each call gets the next proxy. If a proxy
-    produces connection errors (all engines failed), it's cooled for 60s.
-    If all proxies are cooled, ``get_proxy`` returns None (direct connection).
+    produces connection errors (all engines failed), it's cooled for 60s and
+    its consecutive-failure counter increments. Proxies with >= 3 consecutive
+    failures are treated as dead and skipped until a probe (``health_check``)
+    or a successful call revives them. ``health_check`` actively probes every
+    proxy once so a pool with stale dead entries heals by itself.
 
     State is in-memory only (not persisted). Resets on restart.
     """
 
     PROXY_COOLDOWN = 60.0
+    MAX_CONSECUTIVE_FAILS = 3  # beyond this a proxy is skipped until revived
 
     def __init__(self, proxies: list[str]) -> None:
         if not proxies:
             raise ValueError("ProxyPool requires at least one proxy")
         self._proxies = list(proxies)
         self._state: dict[str, dict[str, float | str]] = {p: {} for p in self._proxies}
+        self._stats: dict[str, dict[str, int]] = {
+            p: {"success": 0, "fail": 0, "consecutive_fails": 0} for p in self._proxies
+        }
         self._idx = 0  # round-robin pointer
 
     @property
     def size(self) -> int:
         return len(self._proxies)
 
-    def get_proxy(self) -> str | None:
-        """Return the next available (non-cooled) proxy.
+    def _is_dead(self, proxy: str) -> bool:
+        return self._stats.get(proxy, {}).get("consecutive_fails", 0) >= self.MAX_CONSECUTIVE_FAILS
 
-        Returns None if all proxies are cooled (caller falls back to direct).
+    def get_proxy(self) -> str | None:
+        """Return the next available (non-cooled, not-dead) proxy.
+
+        Returns None if all proxies are cooled/dead (caller falls back to
+        direct). A dead proxy is skipped only while a live one exists; if every
+        proxy is dead, the first one is returned anyway (stale probe results
+        shouldn't hard-block a call that might succeed).
         """
         now = time.time()
+        candidates = []
         for i in range(len(self._proxies)):
             proxy = self._proxies[(self._idx + i) % len(self._proxies)]
             state = self._state.get(proxy, {})
             until = state.get("cooled_until", 0)
             if isinstance(until, (int, float)) and until < now:
-                self._idx = (self._idx + i + 1) % len(self._proxies)
-                return proxy
-        # All cooled → direct connection (None = no proxy).
-        return None
+                candidates.append(proxy)
+        if not candidates:
+            return None
+        live = [p for p in candidates if not self._is_dead(p)]
+        chosen = live[0] if live else candidates[0]
+        self._idx = (self._proxies.index(chosen) + 1) % len(self._proxies)
+        return chosen
 
     def mark_failed(self, proxy: str) -> None:
-        """Cool a proxy that produced connection errors."""
+        """Cool a proxy that produced connection errors and bump its fail stats."""
         self._state.setdefault(proxy, {})["cooled_until"] = time.time() + self.PROXY_COOLDOWN
+        stats = self._stats.setdefault(proxy, {"success": 0, "fail": 0, "consecutive_fails": 0})
+        stats["fail"] += 1
+        stats["consecutive_fails"] += 1
 
     def mark_success(self, proxy: str) -> None:
-        """Clear cooldown for a proxy that returned results."""
+        """Clear cooldown for a proxy that returned results and reset its fail streak."""
         self._state.setdefault(proxy, {}).pop("cooled_until", None)
+        stats = self._stats.setdefault(proxy, {"success": 0, "fail": 0, "consecutive_fails": 0})
+        stats["success"] += 1
+        stats["consecutive_fails"] = 0
+
+    async def health_check(self, probe_url: str = "https://example.com", timeout: int = 10) -> dict[str, bool]:
+        """Probe every proxy once; healthy ones are revived (fail streak reset).
+
+        Returns {proxy: alive} for diagnostics. Runs concurrently with bounded
+        fan-out. A proxy that fails the probe is cooled for PROXY_COOLDOWN but
+        NOT marked dead — a single probe failure is not proof of death.
+        """
+        import asyncio
+        from master_fetch.fetcher import HTTPSession
+
+        async def _probe(proxy: str) -> tuple[str, bool]:
+            try:
+                async with HTTPSession(proxy=proxy, stealthy_headers=False, retries=0, timeout=timeout) as session:
+                    resp = await session.get(probe_url, follow_redirects="safe")
+                return proxy, getattr(resp, "status", 0) < 500
+            except Exception:
+                return proxy, False
+
+        sem = asyncio.Semaphore(min(5, len(self._proxies)))
+
+        async def _bounded(proxy: str) -> tuple[str, bool]:
+            async with sem:
+                return await _probe(proxy)
+
+        results = dict(await asyncio.gather(*(_bounded(p) for p in self._proxies)))
+        for proxy, alive in results.items():
+            if alive:
+                self.mark_success(proxy)
+            else:
+                self._state.setdefault(proxy, {})["cooled_until"] = time.time() + self.PROXY_COOLDOWN
+        return results
 
     def status(self) -> list[dict[str, str | float | bool]]:
         """Return per-proxy status for diagnostics."""
@@ -231,10 +227,14 @@ class ProxyPool:
             state = self._state.get(p, {})
             until = state.get("cooled_until", 0)
             cooled = isinstance(until, (int, float)) and until > now
+            stats = self._stats.get(p, {})
             result.append({
-                "proxy": redact_proxy(p),
+                "proxy": _redact(p),
                 "cooled": cooled,
                 "cooled_remaining": max(0, until - now) if cooled else 0,
+                "dead": self._is_dead(p),
+                "success": stats.get("success", 0),
+                "fail": stats.get("fail", 0),
             })
         return result
 
@@ -264,7 +264,24 @@ def get_next_proxy() -> str | None:
     return pool.get_proxy()
 
 
-def reset_pool() -> None:
-    """Force re-creation of the pool on next access (for tests / config changes)."""
-    global _pool
-    _pool = None
+# Fire-and-forget probe: after the first pool creation, kick off a background
+# health check so dead proxies are detected without blocking the first search.
+_health_task: "asyncio.Task | None" = None
+
+
+def _kick_health_check() -> None:
+    """Start the background proxy health probe once per process (no-op after)."""
+    import asyncio
+    global _health_task
+    if _health_task is not None:
+        return
+    pool = get_proxy_pool()
+    if pool is None:
+        return
+    try:
+        _health_task = asyncio.create_task(pool.health_check())
+        _health_task.add_done_callback(lambda _t: _health_task is not None)
+    except RuntimeError:
+        # No running event loop (called outside async context) — skip; the
+        # next search that creates the pool retries.
+        pass

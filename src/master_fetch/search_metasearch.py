@@ -22,7 +22,6 @@ can escape from a single IP.
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -34,7 +33,7 @@ from random import SystemRandom
 from time import time
 from types import TracebackType
 from typing import Any, ClassVar, Optional, TypeVar
-from urllib.parse import parse_qs, quote, unquote_plus, urlparse
+from urllib.parse import quote, unquote_plus, urlparse
 
 import h2
 import httpcore
@@ -65,11 +64,12 @@ def _get_search_proxy() -> str | None:
     ``search_engines.py`` lazy imports see the current proxy.
     """
     global _PROXY, _proxy_pool
-    from master_fetch.search_proxy import get_proxy_pool
+    from master_fetch.search_proxy import get_proxy_pool, _kick_health_check
     pool = get_proxy_pool()
     if pool is None:
         _PROXY = None
         return None
+    _kick_health_check()
     proxy = pool.get_proxy()
     # If all proxies are cooled, fall back to direct (None = no proxy).
     _PROXY = proxy
@@ -138,9 +138,6 @@ class _PrimpClient:
 
     def get(self, url: str, *args: Any, **kwargs: Any) -> _PrimpResponse:
         return self.request("GET", url, *args, **kwargs)
-
-    def post(self, url: str, *args: Any, **kwargs: Any) -> _PrimpResponse:
-        return self.request("POST", url, *args, **kwargs)
 
 
 # ─── transport: httpx (HTTP/2 + randomized fingerprint, for DuckDuckGo) ──────
@@ -359,59 +356,6 @@ class Duckduckgo(BaseSearchEngine):
         return [r for r in results if not r.href.startswith("https://duckduckgo.com/y.js?")]
 
 
-# ─── Bing (disabled upstream; kept off by default - DDG/Yahoo serve its index) ─
-def _unwrap_bing_url(raw_url: str) -> str | None:
-    parsed = urlparse(raw_url)
-    u_vals = parse_qs(parsed.query).get("u", [])
-    if not u_vals:
-        return None
-    u = u_vals[0]
-    if len(u) <= 2:
-        return None
-    b64 = u[2:]
-    return base64.urlsafe_b64decode(b64 + "=" * (-len(b64) % 4)).decode()
-
-
-class Bing(BaseSearchEngine):
-    disabled = True  # DDG + Yahoo already serve Bing's index; direct Bing is redundant.
-    name = "bing"
-    provider = "bing"
-    search_url = "https://www.bing.com/search"
-    search_method = "GET"
-    items_xpath = "//li[contains(@class, 'b_algo')]"
-    elements_xpath: ClassVar[Mapping[str, str]] = {
-        "title": ".//h2/a//text()", "href": ".//h2/a/@href", "body": ".//p//text()",
-    }
-
-    def build_payload(self, query: str, region: str, safesearch: str,  # noqa: ARG002
-                      timelimit: str | None, page: int = 1, **kwargs: str) -> dict[str, Any]:
-        country, lang = region.lower().split("-")
-        payload = {"q": query, "pq": query, "cc": lang}
-        self.http_client.client.set_cookies(  # type: ignore[attr-defined]
-            "https://www.bing.com",
-            {"_EDGE_CD": f"m={lang}-{country}&u={lang}-{country}",
-             "_EDGE_S": f"mkt={lang}-{country}&ui={lang}-{country}"},
-        )
-        if timelimit:
-            d = int(time() // 86400)
-            code = f"ez5_{d - 365}_{d}" if timelimit == "y" else "ez" + {"d": "1", "w": "2", "m": "3"}[timelimit]
-            payload["filters"] = f'ex1:"{code}"'
-        if page > 1:
-            payload["first"] = f"{(page - 1) * 10}"
-            payload["FORM"] = f"PERE{page - 2 if page > 2 else ''}"
-        return payload
-
-    def post_extract_results(self, results: list[Any]) -> list[Any]:
-        out = []
-        for r in results:
-            if r.href.startswith("https://www.bing.com/aclick?"):
-                continue
-            if r.href.startswith("https://www.bing.com/ck/a?"):
-                r.href = _unwrap_bing_url(r.href) or r.href
-            out.append(r)
-        return out
-
-
 # ─── Brave ───────────────────────────────────────────────────────────────────
 class Brave(BaseSearchEngine):
     name = "brave"
@@ -438,24 +382,6 @@ class Brave(BaseSearchEngine):
         if page > 1:
             payload["offset"] = f"{page - 1}"
         return payload
-
-
-# ─── Google (Android UA + CONSENT cookie; often CAPTCHAs under load) ─────────
-def _google_ua() -> str:
-    devices = (
-        ("5.0", "SM-G900P Build/LRX21T", 39, 60),
-        ("6.0", "Nexus 5 Build/MRA58N", 39, 60),
-        ("8.0", "Pixel 2 Build/OPD3.170816.012", 39, 60),
-    )
-    av, dev, cmin, cmax = random.choice(devices)
-    cmaj = random.randint(cmin, cmax)
-    ua = (f"Mozilla/5.0 (Linux; Android {av}; {dev}) AppleWebKit/537.36 "
-          f"(KHTML, like Gecko) Chrome/{cmaj}.0.{random.randint(1000, 9999)}.{random.randint(1000, 1999)} "
-          f"Mobile Safari/537.36")
-    return ua + bytes.fromhex("4e53544e5756").decode()
-
-
-# ─── Grokipedia (keyless JSON API; encyclopedic/topic queries) ───────────────
 
 
 # ─── Grokipedia (keyless JSON API; encyclopedic/topic queries) ───────────────
@@ -733,11 +659,6 @@ def _record_success(name: str) -> None:
     if name in _BACKEND_HEALTH:
         _BACKEND_HEALTH.pop(name, None)
         _save_circuit_state()
-
-
-def _reset_circuit_breaker() -> None:
-    """Test hook: clear all circuit-breaker state."""
-    _BACKEND_HEALTH.clear()
 
 
 def _resolve_backends(engines: Optional[list[str]]) -> list[str]:

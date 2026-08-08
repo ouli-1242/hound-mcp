@@ -33,8 +33,6 @@ This rewrite fixes all of that:
   force-reinstalls. It survives because it is not part of the hound-mcp package.
 - **Safe messages.** Every failure prints ONE clean error plus the safe
   recovery (`python ~/.hound/repair.py`), never a bare destructive pip command.
-- **hound doctor / hound --rollback.** Proactive health check, and undo a bad
-  update by reinstalling the previously-recorded version.
 """
 
 from __future__ import annotations
@@ -44,8 +42,7 @@ import sys
 
 __all__ = [
     "check_version", "pad_version",
-    "do_update", "reinstall", "print_version", "doctor", "rollback",
-    "cleanup_old_launcher", "repair_script_path",
+    "do_update", "print_version",
 ]
 
 
@@ -126,13 +123,6 @@ def _hound_launcher_path() -> str | None:
     return None
 
 
-def _stop_hound_cmd() -> str:
-    """Platform command to stop all running hound launcher processes."""
-    if sys.platform == "win32":
-        return "taskkill /IM hound.exe /F"
-    return "pkill -x hound"
-
-
 def _looks_like_file_lock_error(stderr: str) -> bool:
     if not stderr:
         return False
@@ -200,28 +190,6 @@ def _stop_all_hound() -> None:
         pass
 
 
-def cleanup_old_launcher() -> None:
-    """Sweep a stale hound.exe.old left by a previous self-update (Windows).
-
-    Windows locks the running .exe against deletion, so the updater renames the
-    live launcher to hound.exe.old before pip writes a fresh one. The .old can
-    only be deleted once the process running from it exits, so we sweep it on
-    the next launch instead. No-op on non-Windows.
-    """
-    if sys.platform != "win32":
-        return
-    exe = _hound_launcher_path()
-    if not exe:
-        return
-    old = exe + ".old"
-    try:
-        if os.path.exists(old):
-            os.remove(old)
-    except OSError:
-        pass  # still locked (a hound server still runs from it) - leave it
-
-
-# ─── hound home: state + the surviving repair script ───────────────────────
 
 def _hound_home() -> str:
     p = os.path.join(os.path.expanduser("~"), ".hound")
@@ -302,15 +270,6 @@ def _write_last_version(v: str) -> None:
         pass
 
 
-def _read_last_version() -> str | None:
-    try:
-        with open(_state_path("last_version"), "r", encoding="utf-8") as f:
-            v = f.read().strip()
-            return v or None
-    except OSError:
-        return None
-
-
 # ─── pip commands + runner ─────────────────────────────────────────────────
 
 def _pip_cmd(target: str) -> list[str]:
@@ -336,17 +295,6 @@ def _heal_cmd(target: str) -> list[str]:
             f"hound-mcp=={target}", "--quiet", "--disable-pip-version-check",
             "--no-python-version-warning"]
 
-
-def _pip_cmd_full(target: str) -> list[str]:
-    """Full reinstall: force-reinstall hound-mcp[all] at the pinned version
-    with --no-deps. The --force-reinstall triggers pip to install the [all]
-    extras (rapidocr, onnxruntime, tokenizers) even when hound-mcp itself is
-    already at the target version. The --no-deps prevents pip from
-    force-reinstalling transitive deps (which can break version compatibility,
-    e.g. pydantic vs pydantic-core)."""
-    return [sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-deps",
-            f"hound-mcp[all]=={target}", "--quiet", "--disable-pip-version-check",
-            "--no-python-version-warning"]
 
 
 def _run_pip(cmd: list[str]) -> tuple[int, str]:
@@ -611,75 +559,6 @@ def do_update(target: str | None = None) -> None:
     print(ui.branded(ui.ver(new_ver), ui.ok("updated")))
 
 
-def reinstall() -> None:
-    """Full reinstall: hound-mcp + all deps + [all] extras. Fixes broken deps,
-    missing extras, or a stale CDN-downgraded install. Pinned to the latest
-    PyPI version (or current if PyPI is unreachable) to prevent version drift."""
-    from master_fetch import cli_ui as ui
-    installed, latest, _ = check_version()
-    target = latest or installed
-    if not target or target == "unknown":
-        print(ui.branded(ui.red("cannot reinstall"), ui.dim("version unknown")))
-        print("  " + ui.warn("try") + "  " + ui.cmd("pip install hound-mcp[all]"))
-        return
-
-    _write_repair_script()
-    _write_last_version(installed)
-    repair = repair_script_path()
-
-    if installed == "unknown":
-        print(ui.branded(ui.red("install corrupted"), ui.dim("reinstalling...")))
-    else:
-        print(ui.branded(ui.ver(installed), ui.dim("reinstalling with all deps...")))
-
-    if sys.platform == "win32":
-        if _spawn_helper(target, repair, os.getpid(), full=True):
-            print("  " + ui.dim("(completes in this window once this command exits)"))
-            return
-        print("  " + ui.err("could not start the reinstaller"))
-        print("  " + ui.warn("recover with") + "  " + ui.cmd(f'python "{repair}"'))
-        return
-
-    # POSIX: no file lock. Run pip inline with self-heal + verify.
-    others = _other_hound_pids()
-    if others:
-        print("  " + ui.dim(f"{len(others)} hound server(s) running - restart them after"))
-    rc, stderr = _run_pip(_pip_cmd_full(target))
-    if not _advanced(check_version()[0], target):
-        print("  " + ui.dim("first pass did not complete - recovering..."))
-        rc2, stderr2 = _run_pip(_pip_cmd_full(target))
-        new_ver = check_version()[0]
-        if not _advanced(new_ver, target):
-            print("  " + ui.err("reinstall failed: " + _diagnose(stderr2 or stderr)))
-            print("  " + ui.warn("recover with") + "  " + ui.cmd(f'python "{repair}"'))
-            sys.exit(1)
-    new_ver = check_version()[0]
-    print(ui.branded(ui.ver(new_ver), ui.ok("reinstalled")))
-    if others:
-        print("  " + ui.dim(f"restart PID {', '.join(str(p) for p in others)} to use the new version"))
-
-
-def rollback() -> None:
-    """Reinstall the version recorded before the last update (undo a bad update)."""
-    from master_fetch import cli_ui as ui
-    last = _read_last_version()
-    if not last:
-        print(ui.branded(ui.dim("nothing to roll back to"),
-                         ui.dim("no previous version recorded")))
-        return
-    installed = check_version()[0]
-    if _at_or_ahead(installed, last) and installed != "unknown":
-        try:
-            same = pad_version(installed) == pad_version(last)
-        except (ValueError, IndexError):
-            same = installed == last
-        if same:
-            print(ui.branded(ui.ver(installed), ui.dim("already at the previous version")))
-            return
-    print(ui.branded(ui.dim("rolling back"), ui.ver_transition(installed, last)))
-    do_update(target=last)
-
-
 def print_version() -> None:
     """Render `hound -v`: a compact bordered version panel (or a clean error
     panel when the install is corrupted, pointing at the safe repair path)."""
@@ -723,163 +602,3 @@ def print_version() -> None:
         print("  " + ui.warn("update with") + "  " + ui.cmd("hound -u"))
 
 
-def doctor() -> None:
-    """Proactive health check. Diagnoses a half-broken install before it bricks,
-    and offers the right fix. Prints a clean report."""
-    from master_fetch import cli_ui as ui
-    import shutil
-    from importlib.metadata import version as _meta_version
-
-    def _short(p: str, w: int = 34) -> str:
-        if not p:
-            return ""
-        home = os.path.expanduser("~")
-        if p.startswith(home):
-            p = "~" + p[len(home):]
-        if len(p) > w:
-            p = "..." + p[-(w - 3):]
-        return p
-
-    checks: list[tuple[str, bool, str]] = []  # (label, ok, detail)
-
-    # 1. launcher resolves
-    exe = _hound_launcher_path()
-    checks.append(("launcher resolves", bool(exe), _short(exe) or "hound not on PATH"))
-
-    # 2. master_fetch imports + version
-    try:
-        import master_fetch as _mf
-        mf_ver = getattr(_mf, "__version__", "?")
-        checks.append(("package imports", True, mf_ver))
-    except Exception as e:
-        checks.append(("package imports", False, str(e)))
-        mf_ver = None
-
-    # 3. metadata version matches imported version
-    try:
-        meta_ver = _meta_version("hound-mcp")
-        ok = (mf_ver is not None and meta_ver == mf_ver)
-        checks.append(("metadata consistent", ok,
-                       f"meta {meta_ver} vs module {mf_ver}" if not ok else meta_ver))
-    except Exception:
-        checks.append(("metadata consistent", False, "hound-mcp metadata missing"))
-
-    # 4. no stale locked .old
-    stale = ""
-    if exe and sys.platform == "win32":
-        old = exe + ".old"
-        if os.path.exists(old):
-            try:
-                os.remove(old)
-            except OSError:
-                stale = "hound.exe.old locked by a running server (cleaned when it stops)"
-    checks.append(("launcher clean", not stale, stale or "ok"))
-
-    # 5. repair script exists (ensure it)
-    _write_repair_script()
-    rp = repair_script_path()
-    checks.append(("repair script ready", os.path.exists(rp), _short(rp)))
-
-    # 5b. stale hound processes (warns if old servers are running)
-    stale_pids = _other_hound_pids()
-    stale_detail = f"{len(stale_pids)} running: PID {', '.join(str(p) for p in stale_pids[:5])}" if stale_pids else "none running"
-    checks.append(("no stale servers", not stale_pids, stale_detail))
-
-    # 6. core deps importable
-    missing = []
-    for mod in ("httpx", "aiosqlite", "mcp", "pydantic"):
-        try:
-            __import__(mod)
-        except Exception:
-            missing.append(mod)
-    checks.append(("core dependencies", not missing,
-                   ", ".join(missing) + " missing" if missing else "ok"))
-
-    # 7. [all] extras (optional, non-blocking - neural reranking + PDF OCR)
-    optional_missing = []
-    for mod in ("onnxruntime", "tokenizers", "rapidocr"):
-        try:
-            __import__(mod)
-        except Exception:
-            optional_missing.append(mod)
-    optional_ok = not optional_missing
-    optional_detail = ", ".join(optional_missing) + " missing" if optional_missing else "ok"
-
-    # 8. Browser deps (optional, non-blocking - stealthy fetch + screenshot)
-    # These may not install on all platforms (playwright has no aarch64/Termux
-    # wheels). When missing, hound runs in HTTP-only mode.
-    browser_missing = []
-    for mod in ("playwright", "patchright"):
-        try:
-            __import__(mod)
-        except Exception:
-            browser_missing.append(mod)
-    browser_ok = not browser_missing
-    if browser_missing:
-        browser_detail = ", ".join(browser_missing) + " missing (HTTP-only mode)"
-    else:
-        browser_detail = "ok"
-
-    # 8. PyPI reachability + version (info only, not a failure)
-    installed, latest, _ = check_version()
-    if latest is None:
-        checks.append(("PyPI reachable", False, "couldn't reach PyPI"))
-    else:
-        try:
-            ahead = pad_version(installed) >= pad_version(latest)
-        except (ValueError, IndexError):
-            ahead = True
-        checks.append(("PyPI reachable", True,
-                       "up to date" if ahead else f"v{latest} available"))
-
-    # 9. Outbound network connectivity (critical for fetch/search)
-    import socket as _socket
-    _net_ok = False
-    _net_detail = "all targets unreachable"
-    for _host, _port in [("1.1.1.1", 443), ("google.com", 443), ("archive.org", 443)]:
-        try:
-            _s = _socket.create_connection((_host, _port), timeout=5)
-            _s.close()
-            _net_ok = True
-            _net_detail = f"HTTPS reachable ({_host})"
-            break
-        except Exception:
-            pass
-    checks.append(("outbound network", _net_ok,
-                   _net_detail if _net_ok else "BLOCKED - fetch/search/crawl will fail"))
-
-    # Render
-    all_ok = all(ok for _, ok, _ in checks)
-    status = ui.ok("all healthy") if all_ok else ui.err("issues found")
-    rows = [ui.wordmark() + "  " + status, ""]
-    for label, ok_flag, detail in checks:
-        mark = (ui._sty(ui._glyph("\u2713", "+"), ui._GREEN) if ok_flag
-                else ui._sty(ui._glyph("\u2717", "x"), ui._RED))
-        rows.append(f"{mark} {label:<22} {ui.dim(_short(detail, 30))}")
-    # Optional [all] extras (non-blocking, shown with a different marker)
-    opt_mark = (ui._sty(ui._glyph("\u2713", "+"), ui._GREEN) if optional_ok
-                else ui._sty(ui._glyph("!", "!"), ui._MAGENTA))
-    rows.append(f"{opt_mark} {'[all] extras':<22} {ui.dim(_short(optional_detail, 30))}")
-    # Browser deps (non-blocking, same marker style as [all] extras)
-    bw_mark = (ui._sty(ui._glyph("\u2713", "+"), ui._GREEN) if browser_ok
-               else ui._sty(ui._glyph("!", "!"), ui._MAGENTA))
-    rows.append(f"{bw_mark} {'browser deps':<22} {ui.dim(_short(browser_detail, 30))}")
-    print(ui.panel(rows, 64))
-    # Verdict + fixes (outside the panel)
-    if missing:
-        print("  " + ui.warn("fix deps") + "  " + ui.cmd("pip install --force-reinstall hound-mcp"))
-    if any(not ok for _, ok, _ in checks) and not missing:
-        print("  " + ui.warn("repair") + "  " + ui.cmd(f'python "{_short(rp, 46)}"'))
-    if stale_pids:
-        print("  " + ui.warn("stop stale servers") + "  " + ui.cmd("taskkill /IM hound.exe /F") if sys.platform == "win32" else ui.cmd("pkill -x hound"))
-    if not optional_ok:
-        print("  " + ui.warn("install extras") + "  " + ui.cmd("pip install hound-mcp[all]"))
-    if not browser_ok:
-        print("  " + ui.warn("browser mode") + "  HTTP-only (stealthy/screenshot disabled). "
-              + ui.cmd("pip install hound-mcp[all]") + " if your platform supports playwright)")
-    if latest and installed != "unknown":
-        try:
-            if pad_version(installed) < pad_version(latest):
-                print("  " + ui.warn("update") + "  " + ui.cmd("hound -u"))
-        except (ValueError, IndexError):
-            pass

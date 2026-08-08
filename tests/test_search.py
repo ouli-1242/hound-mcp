@@ -14,7 +14,7 @@ from master_fetch import search as search
 from master_fetch import search_engines as se
 from master_fetch.search_engines import (
     _passes_site_filter, _normalize_domain, _is_domain_or_subdomain,
-    RawResult, EngineReport, multi_search, normalize_url,
+    RawResult, EngineReport, multi_search,
     DEFAULT_ENGINES, _INDEX_FAMILY,
 )
 
@@ -28,7 +28,7 @@ def smart_search_cache(monkeypatch):
     async def fake_get_cached(query, cache_type, css_selector, **kwargs):
         return cache.get((query, cache_type))
 
-    async def fake_set_cached(query, cache_type, content, status, css_selector, ttl):
+    async def fake_set_cached(query, cache_type, content, status, css_selector, ttl, **kwargs):
         cache[(query, cache_type)] = {"content": content}
 
     async def fake_multi_search(query, max_results, **kwargs):
@@ -255,27 +255,6 @@ class TestGitHubReservedRoutes:
             assert a != b, f"Route '{route}' should not be case-folded"
 
 
-# ─── URL normalization ─────────────────────────────────────────────
-
-class TestNormalizeUrl:
-
-    def test_lowercases_scheme_and_host(self):
-        assert normalize_url("HTTPS://Example.COM/Path") == "https://example.com/Path"
-
-    def test_strips_trailing_slash_on_non_root(self):
-        assert normalize_url("https://example.com/page/") == "https://example.com/page"
-
-    def test_preserves_root_slash(self):
-        assert normalize_url("https://example.com/") == "https://example.com/"
-
-    def test_handles_protocol_relative(self):
-        result = normalize_url("//example.com/path")
-        assert result.startswith("https://")
-
-    def test_empty_returns_empty(self):
-        assert normalize_url("") == ""
-
-
 # ─── multi_search mapping logic ────────────────────────────────────
 
 class TestMultiSearchMapping:
@@ -428,7 +407,7 @@ class TestSearchProxyValidation:
         else:
             monkeypatch.setenv("HOUND_SEARCH_PROXY", env_value)
         monkeypatch.setattr(sp, "_config_path", lambda: tmp_path / "no_such_proxies.json")
-        sp.reset_pool()
+        sp._pool = None
         return sp.load_proxies()
 
     def test_whitespace_stripped(self, monkeypatch, tmp_path):
@@ -657,3 +636,47 @@ class TestNewsYearDynamic:
 
     def test_news_no_expansion(self):
         assert search._expand_query("latest AI announcement", "news") == "latest AI announcement"
+
+
+class TestIrrelevantFilter:
+    """_filter_irrelevant_results: drop noise when engines return filler."""
+
+    def _res(self, title, url, snippet=""):
+        return search.SearchResult(title=title, url=url, snippet=snippet)
+
+    def test_gibberish_query_filters_all(self):
+        results = [
+            self._res("SpaceX", "https://spacex.com", "rockets"),
+            self._res("Facebook", "https://facebook.com", "social media"),
+        ]
+        out = search._filter_irrelevant_results(results, "xqzkjfhoiqweudhxqzkj")
+        assert out == []
+
+    def test_relevant_results_kept(self):
+        results = [
+            self._res("Python Async Guide", "https://example.com/async", "asyncio best practices"),
+        ]
+        out = search._filter_irrelevant_results(results, "python asyncio")
+        assert out == [results[0]]
+
+    def test_partial_relevance_keeps_all(self):
+        # At least one result matches a term -> keep the set (ranking handles the rest)
+        results = [
+            self._res("SpaceX launch", "https://spacex.com", "python in flight software"),
+            self._res("random page", "https://fb.com", "x"),
+        ]
+        out = search._filter_irrelevant_results(results, "python asyncio")
+        assert len(out) == 2
+
+    def test_cjk_query_never_filtered(self):
+        results = [self._res("Some English page", "https://example.com/")]
+        # '量子计算' has no latin terms -> engines' judgment stands
+        assert search._filter_irrelevant_results(results, "量子计算 最新进展") == results
+
+    def test_empty_results_returns_empty(self):
+        assert search._filter_irrelevant_results([], "anything") == []
+
+    def test_stopword_only_query_never_filtered(self):
+        results = [self._res("The", "https://example.com/")]
+        # 'how to' -> terms empty (stopwords) -> keep
+        assert search._filter_irrelevant_results(results, "how to") == results

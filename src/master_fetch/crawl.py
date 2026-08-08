@@ -493,7 +493,6 @@ async def smart_crawl(
     max_total_chars: Optional[int] = None,
     concurrency: int = 3,
     cache_ttl: int = 3600,
-    respect_robots: bool = False,
     force_fetcher: Optional[str] = None,
     timeout: int = 30000,
     deadline_ms: int = 120000,
@@ -511,7 +510,6 @@ async def smart_crawl(
     """
     from master_fetch.security import validate_url, SecurityError
     from master_fetch.trafilatura_extractor import extract_html_title
-    from master_fetch.robots import is_allowed
 
     t0 = time()
     deadline_t = t0 + (deadline_ms / 1000.0)
@@ -615,7 +613,7 @@ async def smart_crawl(
                 resp = await server.smart_fetch(
                     url=u, extraction_type="html", cache_ttl=cache_ttl,
                     max_content_chars=200000, force_fetcher=force_fetcher,
-                    respect_robots=respect_robots, timeout=timeout,
+                    timeout=timeout,
                     proxy=_crawl_proxy,
                 )
             except Exception as e:
@@ -626,7 +624,7 @@ async def smart_crawl(
                         resp = await server.smart_fetch(
                             url=u, extraction_type="html", cache_ttl=cache_ttl,
                             max_content_chars=200000, force_fetcher=force_fetcher,
-                            respect_robots=respect_robots, timeout=timeout,
+                            timeout=timeout,
                             proxy=_crawl_proxy,
                         )
                     except Exception as e2:

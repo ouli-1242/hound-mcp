@@ -50,6 +50,28 @@ class TestExtractBySelector:
         result = extract_structured(SAMPLE_HTML, schema)
         assert result["features"] == ["Fast", "Reliable", "Compact"]
 
+    def test_count_type_returns_element_count(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "li_count": {"type": "count", "selector": ".features li"},
+                "h1_count": {"type": "count", "selector": "h1.title"},
+            }
+        }
+        result = extract_structured(SAMPLE_HTML, schema)
+        assert result["li_count"] == 3
+        assert result["h1_count"] == 1
+
+    def test_count_missing_selector_returns_none(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "ghost_count": {"type": "count", "selector": ".does-not-exist"},
+            }
+        }
+        result = extract_structured(SAMPLE_HTML, schema)
+        assert result["ghost_count"] in ("", None)
+
     def test_missing_selector_returns_empty(self):
         schema = {
             "type": "object",

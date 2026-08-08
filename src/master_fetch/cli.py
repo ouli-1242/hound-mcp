@@ -97,7 +97,6 @@ def main() -> int:
         rc = _run_repair()
         if rc != 0:
             print("  If recovery failed, run: pip install --force-reinstall hound-mcp")
-            print("  Or: hound --doctor")
         return rc
     except Exception:
         # Any other import-time crash (not a missing module) - re-raise

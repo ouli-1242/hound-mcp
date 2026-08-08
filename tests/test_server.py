@@ -116,6 +116,47 @@ class TestDetectContentIssue:
         result = _make_result(content=["Choose your country to continue shopping"])
         assert "geo_redirect" in _detect_content_issue(result)
 
+    def test_auth_wall_detected(self):
+        # zhihu.com redirects to /signin and serves only the login form
+        result = _make_result(
+            url="https://www.zhihu.com/signin?next=%2F",
+            content=["知乎 - 有问题，就会有答案", "验证码登录", "密码登录",
+                     "获取短信验证码", "登录/注册"],
+        )
+        assert "auth_wall" in _detect_content_issue(result)
+
+    def test_auth_wall_not_detected_on_normal_nav(self):
+        # A stray "Sign in" link in the navbar is not a wall
+        result = _make_result(content=["Home", "Sign in", "About us", "Contact"])
+        assert "auth_wall" not in _detect_content_issue(result)
+
+    def test_auth_wall_login_path_with_single_signal(self):
+        result = _make_result(url="https://example.com/login", content=["Home", "Sign in"])
+        assert "auth_wall" in _detect_content_issue(result)
+
+    def test_pdf_no_text_is_not_js_shell(self):
+        # Scanned PDF with no text layer: distinct pdf_no_text error, never js_shell
+        result = _make_result(
+            content=["> OCR-extracted from scanned PDF · 1 pages", "--- Page 1 ---",
+                     "[No text detected on this page.]"],
+            content_type="application/pdf; qs=0.001",
+            total_size_bytes=13264,
+        )
+        issue = _detect_content_issue(result)
+        assert "pdf_no_text" in issue
+        assert "js_shell" not in issue
+
+    def test_pdf_with_text_has_no_issue(self):
+        result = _make_result(
+            content=["Real PDF text content here."],
+            content_type="application/pdf",
+        )
+        assert _detect_content_issue(result) == ""
+
+    def test_pdf_with_http_error_still_reports_error(self):
+        result = _make_result(status=404, content=["Not Found"], content_type="application/pdf")
+        assert "http_error_404" in _detect_content_issue(result)
+
     def test_http_404_error(self):
         result = _make_result(status=404, content=["404 Not Found"])
         assert "http_error_404" in _detect_content_issue(result)
@@ -610,7 +651,7 @@ class TestSmartFetchProxy:
     @pytest.mark.asyncio
     async def test_auto_escalation_proxy_bypasses_direct_auto_session(self):
         server = MasterFetchServer()
-        server._http_with_retry = AsyncMock(
+        server.get = AsyncMock(
             return_value=_make_result(status=403, content=["Forbidden"])
         )
         server._ensure_auto_session = AsyncMock(return_value="direct-session")
@@ -648,7 +689,7 @@ class TestSmartFetchFocusContext:
     @pytest.mark.asyncio
     async def test_bulk_fetch_forwards_focus_to_each_result(self):
         server = MasterFetchServer(cache_ttl=0)
-        server._http_with_retry = AsyncMock(return_value=self._long_content_result())
+        server.get = AsyncMock(return_value=self._long_content_result())
 
         result = await server.smart_fetch(
             "https://example.com",
@@ -666,7 +707,7 @@ class TestSmartFetchFocusContext:
     @pytest.mark.asyncio
     async def test_no_focus_call_does_not_inherit_previous_focus(self):
         server = MasterFetchServer(cache_ttl=0)
-        server._http_with_retry = AsyncMock(
+        server.get = AsyncMock(
             side_effect=[self._long_content_result(), self._long_content_result()]
         )
 

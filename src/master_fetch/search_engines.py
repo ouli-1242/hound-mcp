@@ -79,20 +79,6 @@ class EngineReport:
     error: str = ""
 
 
-def normalize_url(url: str) -> str:
-    """Light URL normalization for dedup (lowercase host, strip non-root trailing slash)."""
-    if not url:
-        return ""
-    u = url.strip()
-    if u.startswith("//"):
-        u = "https:" + u
-    p = urlparse(u)
-    scheme = (p.scheme or "https").lower()
-    host = p.netloc.lower()
-    path = p.path.rstrip("/") if len(p.path) > 1 else p.path
-    return f"{scheme}://{host}{path}"
-
-
 def _normalize_domain(value: str) -> str:
     """Return a comparable hostname without a cosmetic leading ``www.``."""
     value = value.strip()

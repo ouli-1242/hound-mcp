@@ -547,6 +547,26 @@ def _quality_filter(results: list[SearchResult], min_keep: int = 3) -> list[Sear
     return kept
 
 
+def _filter_irrelevant_results(results: list[SearchResult], query: str) -> list[SearchResult]:
+    """Drop ALL results when none contains any meaningful query term.
+
+    Search engines sometimes answer gibberish/random queries with unrelated
+    filler (e.g. DDG returns SpaceX for a random string). When the query has
+    latin terms and NO result's title/snippet/url contains any of them, the
+    results are pure noise — return empty so the agent doesn't chase garbage.
+
+    Queries with no latin terms (CJK, symbols) are never filtered — the
+    engines' own judgment stands, since we can't tokenize them reliably.
+    """
+    terms = _query_terms(query)
+    if not terms:
+        return results
+    blob = " ".join(f"{r.title} {r.snippet} {r.url}".lower() for r in results)
+    if any(t in blob for t in terms):
+        return results
+    return []
+
+
 # ─── six-signal quality boost (zero-latency, no extra fetches) ───────────────
 
 _TECH_QUERY_SIGNALS = frozenset({
@@ -910,7 +930,7 @@ async def smart_search(
     if cache_region is not None:
         cache_type = f"{cache_type}:region={cache_region}"
     if cache_ttl > 0:
-        cached = await get_cached(cache_query, cache_type, None, ttl=cache_ttl)
+        cached = await get_cached(cache_query, cache_type, None, ttl=cache_ttl, scope="search")
         if cached and cached.get("content"):
             try:
                 data = json.loads(cached["content"][0])
@@ -1066,6 +1086,7 @@ async def smart_search(
         ranked_list, scores = ranked_list[:max_results], scores[:max_results]
         results_list = _build_results(query, ranked_list, scores, total_families)
         results_list = _quality_filter(results_list)
+        results_list = _filter_irrelevant_results(results_list, query)
         fetch_hint = compute_fetch_hint(results_list)
         if rerank_note:
             fetch_hint = (fetch_hint + " | " + rerank_note) if fetch_hint else rerank_note
@@ -1104,7 +1125,7 @@ async def smart_search(
             "rerank_mode": rerank_used,
             "related_queries": _rq_cache,
         })
-        await set_cached(cache_query, cache_type, [cache_data], 200, None, cache_ttl)
+        await set_cached(cache_query, cache_type, [cache_data], 200, None, cache_ttl, scope="search")
 
     return SearchResponseModel(
         query=cache_query, results=results_list, total_results=len(results_list),

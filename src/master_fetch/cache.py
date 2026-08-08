@@ -35,13 +35,15 @@ def _get_db_lock() -> asyncio.Lock:
 
 
 def _cache_key(url: str, extraction_type: str, css_selector: str | None = None,
-               pages: str | None = None, source: str = "live") -> str:
+               pages: str | None = None, source: str = "live", scope: str = "fetch") -> str:
     """Deterministic cache key from fetch params.
 
     ``source`` separates live vs archive.org entries so a page that gets unblocked
     within TTL isn't served a stale archive snapshot (and vice versa).
+    ``scope`` separates fetch entries from search-result entries (search.py
+    stores query strings + serialized params in the same table).
     """
-    raw = f"{url}|{extraction_type}|{css_selector or ''}|{pages or ''}|{source or 'live'}"
+    raw = f"{scope}|{url}|{extraction_type}|{css_selector or ''}|{pages or ''}|{source or 'live'}"
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
 
@@ -93,6 +95,9 @@ async def _ensure_db(cache_dir: Path | None = None) -> Path:
                 # v10: envelope round-trips metadata/links/quality_score/toc/page_type/
                 # source/archived_at so cache hits restore them (previously lost on hit).
                 "ALTER TABLE cache ADD COLUMN envelope TEXT NOT NULL DEFAULT '{}'",
+                # scope separates fetch entries from search-result entries that
+                # reuse the same table (search.py stores queries in the url column).
+                "ALTER TABLE cache ADD COLUMN scope TEXT NOT NULL DEFAULT 'fetch'",
             ):
                 try:
                     await db.execute(ddl)
@@ -114,13 +119,14 @@ async def get_cached(
     cache_dir: Path | None = None,
     pages: str | None = None,
     source: str = "live",
+    scope: str = "fetch",
 ) -> dict | None:
     """Return cached response if fresh, else None.
 
     Uses the *lesser* of the stored TTL and the caller-requested TTL.
     This prevents serving stale cache when caller wants a fresher window.
     """
-    key = _cache_key(url, extraction_type, css_selector, pages, source)
+    key = _cache_key(url, extraction_type, css_selector, pages, source, scope)
     db_path = await _ensure_db(cache_dir)
 
     async with aiosqlite.connect(db_path) as db:
@@ -157,6 +163,7 @@ async def set_cached(
     pages: str | None = None,
     source: str = "live",
     envelope: dict | None = None,
+    scope: str = "fetch",
 ) -> None:
     """Store a response in cache.
 
@@ -166,7 +173,7 @@ async def set_cached(
     source/archived_at so cache hits restore the full research-grade response
     (previously these fields were silently dropped on cache hits).
     """
-    key = _cache_key(url, extraction_type, css_selector, pages, source)
+    key = _cache_key(url, extraction_type, css_selector, pages, source, scope)
     db_path = await _ensure_db(cache_dir)
     env_json = json.dumps(envelope) if envelope else "{}"
 
@@ -174,10 +181,10 @@ async def set_cached(
         await db.execute(
             """INSERT OR REPLACE INTO cache
                (key, url, extraction_type, content, status, fetched_at, ttl,
-                content_type, total_size_bytes, envelope)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                content_type, total_size_bytes, envelope, scope)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (key, url, extraction_type, json.dumps(content), status,
-             time.time(), ttl, content_type, total_size_bytes, env_json),
+             time.time(), ttl, content_type, total_size_bytes, env_json, scope),
         )
         # Bound the cache: if over MAX_CACHE_ENTRIES, evict the oldest rows by
         # fetched_at down to 90% of the cap. Cheaper than per-insert single

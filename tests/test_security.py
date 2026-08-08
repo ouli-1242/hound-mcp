@@ -38,6 +38,7 @@ class TestSSRFBypassVectors:
         "http://0177.0.0.1/admin",        # octal per-octet -> 127.0.0.1
         "http://0x7f.0x0.0x0.0x1/admin", # hex per-octet -> 127.0.0.1
         "http://2130706433/admin",         # decimal integer -> 127.0.0.1
+        "http://0x7f000001/admin",         # hex integer -> 127.0.0.1 (inet_aton)
         "http://127.1/admin",              # short-form -> 127.0.0.1
     ])
     def test_rejects_alternate_ip_notations(self, url):
@@ -109,6 +110,16 @@ class TestURLValidation:
     def test_accepts_url_with_port(self):
         assert validate_url("https://example.com:8080/path") == "https://example.com:8080/path"
 
+    @pytest.mark.parametrize("url", [
+        "http://example.com:70000/",   # port > 65535
+        "http://example.com:0/",       # port 0 is invalid
+        "http://example.com:abc/",     # non-numeric port
+        "http://127.0.0.1:99999/",     # oversized on private IP
+    ])
+    def test_rejects_invalid_ports(self, url):
+        with pytest.raises(SecurityError, match="port"):
+            validate_url(url)
+
     def test_rejects_empty_string(self):
         with pytest.raises(SecurityError, match="non-empty"):
             validate_url("")
@@ -142,6 +153,7 @@ class TestNormalizeIPNotation:
         ("0177.0.0.1", "127.0.0.1"),       # octal per-octet
         ("0x7f.0x0.0x0.0x1", "127.0.0.1"), # hex per-octet
         ("2130706433", "127.0.0.1"),        # decimal integer
+        ("0x7f000001", "127.0.0.1"),        # hex integer (inet_aton form)
         ("127.1", "127.0.0.1"),             # 2-part short form
         ("127.0.1", "127.0.0.1"),           # 3-part short form
     ])
@@ -219,6 +231,10 @@ class TestHeaderValidation:
     def test_rejects_newline_in_name(self):
         with pytest.raises(SecurityError, match="newline"):
             validate_headers({"X-Evil\nHeader": "value"})
+
+    def test_rejects_backslash_in_name(self):
+        with pytest.raises(SecurityError, match="backslash"):
+            validate_headers({"X-Evil\\Header": "value"})
 
     @pytest.mark.parametrize("forbidden", ["host", "content-length", "transfer-encoding", "connection"])
     def test_rejects_forbidden_headers(self, forbidden):

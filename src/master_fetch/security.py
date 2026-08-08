@@ -92,6 +92,20 @@ def _normalize_ip_notation(host: str) -> str | None:
             pass
         return None
 
+    # Case: packed hex integer in a single segment (0x7f000001 → 127.0.0.1).
+    # curl/libcurl's inet_aton accepts this form; ipaddress rejects it. Without
+    # this branch, http://0x7f000001/ bypassed SSRF checks and reached loopback
+    # (dotted hex like 0x7f.0.0.1 is handled by the parts loop below).
+    if cleaned.lower().startswith("0x") and len(cleaned) > 2 \
+            and all(c in "0123456789abcdef" for c in cleaned[2:].lower()):
+        try:
+            val = int(cleaned, 16)
+            if val <= 0xFFFFFFFF:
+                return f"{(val >> 24) & 0xFF}.{(val >> 16) & 0xFF}.{(val >> 8) & 0xFF}.{val & 0xFF}"
+        except (ValueError, OverflowError):
+            pass
+        return None
+
     # Case: dotted notation (127.0.0.1, 0177.0.0.1, 0x7f.1, 127.1)
     parts = cleaned.split('.')
     if not (1 <= len(parts) <= 4):
@@ -203,6 +217,17 @@ def validate_url(url: str, allow_internal: bool = False) -> str:
     hostname = parsed.hostname
     if not hostname:
         raise SecurityError("URL has no valid hostname")
+
+    # Reject invalid or out-of-range ports (http://host:70000/ or :abc/).
+    # urlparse accepts these silently; most HTTP clients refuse or misroute
+    # them, so treating them as valid hides config errors and can point at
+    # an unexpected service.
+    try:
+        port = parsed.port
+    except ValueError:
+        raise SecurityError("URL has invalid port")
+    if port is not None and not (0 < port <= 65535):
+        raise SecurityError(f"URL port out of range: {port}")
 
     # Check for internal IPs (only if hostname is an IP)
     if not allow_internal:
@@ -338,6 +363,14 @@ def validate_headers(headers: Optional[dict]) -> Optional[dict]:
         if "\n" in name or "\r" in name or "\n" in value or "\r" in value:
             raise SecurityError(
                 f"Header '{name}' contains newline characters (header injection)"
+            )
+
+        # Block header names with backslashes — parsers disagree on whether a
+        # backslash separates fields (some HTTP stacks treat it as a soft fold),
+        # so a name like 'X-Foo\Bar' can be interpreted differently downstream.
+        if "\\" in name:
+            raise SecurityError(
+                f"Header name '{name}' contains backslash (field confusion)"
             )
 
         # Block forbidden headers that could interfere with Scrapling

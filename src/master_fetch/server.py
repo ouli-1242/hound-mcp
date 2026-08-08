@@ -8,9 +8,8 @@ Forks Scrapling's built-in MCP server and adds:
 - extract_article and extract_structured modes
 - Input validation with SSRF protection
 
-Note: the dynamic (Playwright) browser tier was removed in v3.5.0. open_session
-still accepts session_type="dynamic" for backward compatibility with manual
-session creation, but smart_fetch auto-routing only uses http -> stealthy.
+Note: the dynamic (Playwright) browser tier was removed in v3.5.0. smart_fetch
+auto-routing only uses http -> stealthy; open_session creates a stealthy session.
 """
 
 from __future__ import annotations
@@ -144,13 +143,12 @@ async def _fallback_http_get(
 
 if TYPE_CHECKING:
     from master_fetch.fetcher import Response as _HoundResponse
-    from master_fetch.browser import StealthyBrowser, DynamicBrowser
+    from master_fetch.browser import StealthyBrowser
     from master_fetch.search import SearchResponseModel
     from mcp.server.fastmcp import Image
     from mcp.types import ImageContent, TextContent
 
 from master_fetch.cache import get_cached, set_cached, clear_cache, clear_all_cache, DEFAULT_TTL
-from master_fetch.robots import is_allowed, clear_robots_cache
 from master_fetch.reddit import is_reddit_url, rewrite_to_old_reddit, parse_old_reddit_listing
 from master_fetch.envelope import (
     classify_source, compute_freshness, detect_page_type, page_type_from_error,
@@ -304,18 +302,6 @@ class BulkResponseModel(BaseModel):
     successful: int = Field(description="Fetches with status<400 + no error")
 
 
-class ArticleModel(BaseModel):
-    """Structured article data extracted by Trafilatura."""
-    title: str = Field(description="Article title")
-    author: str = Field(description="Article author")
-    date: str = Field(description="Publication date")
-    body: str = Field(description="Main article text")
-    description: str = Field(description="Article summary")
-    url: str = Field(description="Source URL")
-    categories: list[str] = Field(default=[], description="Categories")
-    tags: list[str] = Field(default=[], description="Tags")
-
-
 class SessionInfo(BaseModel):
     """Information about an open browser session."""
     session_id: str = Field(description="Session ID")
@@ -397,6 +383,51 @@ _GEO_REDIRECT_SIGNALS = [
     "country selector", "region selector",
 ]
 
+# Login/auth-wall detection. A page redirected to a sign-in endpoint whose
+# content is dominated by login prompts is a wall, not content (e.g. zhihu.com
+# -> /signin returns only the login form with HTTP 200). URL path signals are
+# combined with content signals to avoid false-positives on legit pages that
+# merely include a "Sign in" link in their nav.
+_AUTH_WALL_PATH_SIGNALS = (
+    "/signin", "/sign-in", "/login", "/accounts/login", "/member/login",
+    "/passport/login", "/login.aspx", "/auth/login", "/logon",
+)
+_AUTH_WALL_CONTENT_SIGNALS = (
+    "登录/注册", "验证码登录", "获取短信验证码", "密码登录",
+    "请登录", "点击登录", "立即登录",
+    "sign in to continue", "please sign in", "please log in",
+    "log in to continue", "sign in to view", "log in to view",
+    "login to view", "you must be logged in", "please login",
+)
+
+# Looser vocabulary used only as a CONFIRMATION when the URL already points at
+# a sign-in endpoint. Not usable standalone: "sign in"/"登录" live in normal
+# navbars, so alone they prove nothing.
+_AUTH_WALL_WEAK_SIGNALS = (
+    "sign in", "log in", "password", "username", "忘记密码", "登录",
+)
+
+
+def _is_auth_wall(result) -> bool:
+    """True if the page is a login/sign-in wall rather than content.
+
+    Two paths to a hit: (a) the URL points at a sign-in endpoint AND any
+    sign-in vocabulary (strong or weak) is present, or (b) the extracted text
+    is dominated by >=3 strong sign-in prompts regardless of URL. A stray
+    "Sign in" link in a navbar on a non-login page never triggers this.
+    """
+    try:
+        path = urlparse(result.url).path.lower()
+    except Exception:
+        path = ""
+    path_hit = any(s in path for s in _AUTH_WALL_PATH_SIGNALS)
+    content_str = " ".join(result.content or []).lower().strip()
+    strong_hits = sum(1 for s in _AUTH_WALL_CONTENT_SIGNALS if s in content_str)
+    if path_hit:
+        weak_hits = sum(1 for s in _AUTH_WALL_WEAK_SIGNALS if s in content_str)
+        return (strong_hits + weak_hits) >= 1
+    return strong_hits >= 3
+
 
 def _is_cloudflare_from_response(result: ResponseModel) -> bool:
     """Check if a ResponseModel indicates a bot challenge page.
@@ -462,8 +493,20 @@ def _detect_content_issue(result: ResponseModel) -> str:
     """
     content_str = " ".join(result.content).lower().strip()
 
+    # PDFs are never JS shells. A scanned/image PDF with no text layer is a
+    # distinct failure class ("pdf_no_text"), not a JavaScript rendering issue.
+    # Previously the "large body, little text" heuristic mislabeled it as a JS
+    # shell, which misled agents trying to fix the wrong root cause.
+    if "application/pdf" in (result.content_type or "").lower():
+        if not content_str or "no text detected" in content_str:
+            return "pdf_no_text: scanned/image PDF with no extractable text layer (OCR found nothing)"
+        # PDF with a text layer: fall through so status/error checks still apply.
+
     if _is_js_shell(result):
         return "js_shell_detected: page requires JavaScript rendering but fetcher returned placeholder"
+
+    if _is_auth_wall(result):
+        return "auth_wall_detected: page is a login/sign-in wall, not content"
 
     if any(signal in content_str for signal in _GEO_REDIRECT_SIGNALS):
         return "geo_redirect_detected: page returned region/country selector instead of content"
@@ -589,8 +632,6 @@ def _agent_hints(result: ResponseModel) -> tuple[str, str, bool]:
     err = result.error or ""
     if result.is_truncated and result.next_offset:
         next_action = f"page truncated. Use focus='query' to extract only relevant blocks, or offset={result.next_offset} to continue paginating"
-    elif err == "robots_txt_disallowed":
-        next_action = "blocked by robots.txt: set options.respect_robots=false to bypass"
     elif err.startswith("js_shell_detected"):
         next_action = "page is a JS shell; re-fetch auto-escalates to the stealthy browser"
     elif err.startswith("bot_challenge_detected"):
@@ -1032,7 +1073,7 @@ def _translate_response(
         from master_fetch.extractor import extract_content
         return extract_content(
             page, extraction_type=extraction_type,
-            css_selector=css_selector, main_content_only=main_content_only,
+            css_selector=css_selector,
         )
 
     def _trafilatura_extract():
@@ -1040,19 +1081,6 @@ def _translate_response(
         from master_fetch.trafilatura_extractor import extract_with_trafilatura
         return extract_with_trafilatura(page, extraction_type=extraction_type, css_selector=css_selector)
 
-    def _raw_extract():
-        """Last-resort: return decoded HTML when no extractor is available."""
-        html = raw_body.decode(getattr(page, 'encoding', None) or 'utf-8', errors='replace') if raw_body else ''
-        if extraction_type == "html":
-            return [html]
-        # Minimal text extraction: strip tags with a simple regex pass
-        import re
-        text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r'<[^>]+>', ' ', text)
-        text = re.sub(r'\s+', ' ', text).strip()
-        return [text] if text else [html]
-    
     if is_old_reddit_listing and raw_body:
         try:
             html_text = raw_body.decode(page.encoding or 'utf-8', errors='replace')
@@ -1068,13 +1096,9 @@ def _translate_response(
         content = _trafilatura_extract()
         if (not content or content == [""] or content == ["\n"]):
             content = _hound_extract()
-            if (not content or content == [""] or content == ["\n"]):
-                content = _raw_extract()
     else:
         # Non-trafilatura path: use hound extractor (markdownify + lxml)
         content = _hound_extract()
-        if (not content or content == [""] or content == ["\n"]):
-            content = _raw_extract()
 
     if page.status == 503 and fetcher_used == "stealthy":
         note = "[503 via stealthy fetcher. The target server may block headless browser fingerprints. Try smart_fetch or http/dynamic fetcher instead.]"
@@ -1227,9 +1251,7 @@ class MasterFetchServer:
         self._sessions_lock: Lock = Lock()
         self._cache_ttl = cache_ttl
         self._use_trafilatura = use_trafilatura
-        self._auto_dynamic_id: Optional[str] = None
         self._auto_stealthy_id: Optional[str] = None
-        self._auto_dynamic_last_used: float = 0  # timestamp of last auto dynamic session use
         self._auto_stealthy_last_used: float = 0  # timestamp of last auto stealthy session use
         self._idle_monitor_task: Optional[Any] = None  # asyncio.Task for idle session cleanup
         self._auto_session_lock: Lock = Lock()  # serializes auto-session creation so the startup warm-up + a concurrent fetch never spawn a 2nd browser
@@ -1261,7 +1283,7 @@ class MasterFetchServer:
                 )
             return entry
 
-    async def _ensure_auto_session(self, session_type: SessionType) -> str:
+    async def _ensure_auto_session(self) -> str:
         """Get or create an auto-persistent browser session. Avoids browser startup on every fetch.
 
         Race-safe: if two concurrent calls both pass the initial check,
@@ -1277,8 +1299,8 @@ class MasterFetchServer:
                 "Install browser deps: pip install hound-mcp[all] "
                 "(or pip install playwright patchright)."
             )
-        attr = "_auto_dynamic_id" if session_type == "dynamic" else "_auto_stealthy_id"
-        ts_attr = "_auto_dynamic_last_used" if session_type == "dynamic" else "_auto_stealthy_last_used"
+        attr = "_auto_stealthy_id"
+        ts_attr = "_auto_stealthy_last_used"
 
         # Fast path: reuse an existing alive session.
         async with self._sessions_lock:
@@ -1303,7 +1325,7 @@ class MasterFetchServer:
                     return existing_id
             # Create outside the sessions lock (expensive — browser launch) but
             # inside the creation lock (no concurrent 2nd launch).
-            sid = await self.open_session(session_type=session_type, headless=True)
+            sid = await self.open_session(headless=True)
             async with self._sessions_lock:
                 existing_id = getattr(self, attr)
                 if existing_id and existing_id in self._sessions and self._sessions[existing_id].session._is_alive:
@@ -1366,7 +1388,7 @@ class MasterFetchServer:
                 return check_browser_available()
             if not await asyncio.to_thread(_check_and_import):
                 return  # HTTP-only mode, no browser to prewarm
-            await self._ensure_auto_session("stealthy")
+            await self._ensure_auto_session()
         try:
             await asyncio.wait_for(_warm(), timeout=30.0)
             logger.debug("Stealthy browser warmed at startup")
@@ -1389,12 +1411,6 @@ class MasterFetchServer:
                     continue
                 now_ts = now()
                 async with self._sessions_lock:
-                    # Check dynamic auto session (all reads under lock)
-                    if self._auto_dynamic_id and now_ts - self._auto_dynamic_last_used > AUTO_SESSION_IDLE_TIMEOUT:
-                        close_dynamic = self._auto_dynamic_id
-                        self._auto_dynamic_id = None
-                    else:
-                        close_dynamic = None
                     # Check stealthy auto session (all reads under lock)
                     if self._auto_stealthy_id and now_ts - self._auto_stealthy_last_used > AUTO_SESSION_IDLE_TIMEOUT:
                         close_stealthy = self._auto_stealthy_id
@@ -1402,16 +1418,6 @@ class MasterFetchServer:
                     else:
                         close_stealthy = None
                 # Close sessions outside the lock to avoid blocking
-                if close_dynamic:
-                    try:
-                        await self.close_session(close_dynamic)
-                    except Exception as e:
-                        logger.warning(f"Idle monitor failed to close dynamic session {close_dynamic}: {e}")
-                        # Pop from sessions dict even if close() failed — don't orphan
-                        async with self._sessions_lock:
-                            entry = self._sessions.pop(close_dynamic, None)
-                            if entry:
-                                entry._alive = False
                 if close_stealthy:
                     try:
                         await self.close_session(close_stealthy)
@@ -1466,7 +1472,6 @@ class MasterFetchServer:
             entries = list(self._sessions.items())
             self._sessions.clear()
             self._auto_stealthy_id = None
-            self._auto_dynamic_id = None
         for sid, entry in entries:
             try:
                 await entry.session.close()
@@ -1602,7 +1607,6 @@ class MasterFetchServer:
 
     async def open_session(
         self,
-        session_type: SessionType,
         session_id: Optional[str] = None,
         headless: bool = True,
         google_search: bool = True,
@@ -1620,7 +1624,6 @@ class MasterFetchServer:
         cookies: Sequence[SetCookieParam] | None = None,
         network_idle: bool = False,
         wait_selector_state: SelectorWaitStates = "attached",
-        max_pages: int = 5,
         hide_canvas: bool = False,
         block_webrtc: bool = False,
         allow_webgl: bool = True,
@@ -1633,7 +1636,6 @@ class MasterFetchServer:
         Internal helper — used by _ensure_auto_session to create the single
         warm stealthy session. Not exposed as an MCP tool.
 
-        :param session_type: "dynamic" for standard Playwright, or "stealthy" for anti-bot bypass.
         :param session_id: Optional custom session ID (random 12-char hex if not provided).
         :param headless: Run browser headless (default True).
         :param google_search: Set Google referer header (default True).
@@ -1651,7 +1653,6 @@ class MasterFetchServer:
         :param cookies: Cookies for the session.
         :param network_idle: Wait until no network connections for 500ms.
         :param wait_selector_state: 'attached', 'detached', 'visible', or 'hidden'.
-        :param max_pages: Max concurrent browser tabs (default 5).
         :param hide_canvas: (Stealthy) Random canvas noise for anti-fingerprinting.
         :param block_webrtc: (Stealthy) Prevent IP leak via WebRTC.
         :param allow_webgl: (Stealthy) Keep WebGL enabled (default True; WAFs check for it).
@@ -1677,26 +1678,23 @@ class MasterFetchServer:
         validate_headers(extra_headers)
         validate_css_selector(wait_selector)
 
-        from master_fetch.browser import StealthyBrowser, DynamicBrowser
+        from master_fetch.browser import StealthyBrowser
         common_kwargs: Dict[str, Any] = dict(
             wait=wait, proxy=proxy, locale=locale, timeout=timeout, cookies=cookies,
-            cdp_url=cdp_url, headless=headless, block_ads=True, max_pages=max_pages,
+            cdp_url=cdp_url, headless=headless,
             useragent=useragent, timezone_id=timezone_id, real_chrome=real_chrome,
             network_idle=network_idle, wait_selector=wait_selector, google_search=google_search,
             extra_headers=extra_headers, disable_resources=disable_resources,
             wait_selector_state=wait_selector_state,
         )
 
-        if session_type == "stealthy":
-            session = StealthyBrowser(
-                **common_kwargs, hide_canvas=hide_canvas, block_webrtc=block_webrtc,
-                allow_webgl=allow_webgl, solve_cloudflare=solve_cloudflare,
-                additional_args=additional_args,
-            )
-        else:
-            session = DynamicBrowser(**common_kwargs)
+        session = StealthyBrowser(
+            **common_kwargs, hide_canvas=hide_canvas, block_webrtc=block_webrtc,
+            allow_webgl=allow_webgl, solve_cloudflare=solve_cloudflare,
+            additional_args=additional_args,
+        )
 
-        entry = _SessionEntry(session=session, session_type=session_type)
+        entry = _SessionEntry(session=session, session_type="stealthy")
         async with self._sessions_lock:
             self._sessions[session_id] = entry
         try:
@@ -1708,9 +1706,9 @@ class MasterFetchServer:
             raise
 
         return SessionCreatedModel(
-            session_id=session_id, session_type=session_type,
+            session_id=session_id, session_type="stealthy",
             created_at=entry.created_at, is_alive=True,
-            message=f"Session '{session_id}' ({session_type}) created successfully.",
+            message=f"Session '{session_id}' (stealthy) created successfully.",
         )
 
     async def close_session(self, session_id: Annotated[str, Field(description="Session ID to close")]) -> SessionClosedModel:
@@ -1777,7 +1775,7 @@ class MasterFetchServer:
         if session_id:
             ssid = session_id
         else:
-            ssid = await self._ensure_auto_session("stealthy")
+            ssid = await self._ensure_auto_session()
         entry = await self._get_session(ssid, expected_type=None)
         screenshot_kwargs: Dict[str, Any] = {"type": image_type, "full_page": full_page}
         if quality is not None:
@@ -1972,190 +1970,6 @@ class MasterFetchServer:
         successful = sum(1 for r in results if r.status < 400 and not r.error)
         return BulkResponseModel(results=results, total=len(results), successful=successful)
 
-    # ─── Dynamic Fetcher (Playwright) ──────────────────────────────
-
-    async def fetch(
-        self,
-        url: str,
-        extraction_type: ExtendedExtractionType = "markdown",
-        css_selector: Optional[str] = None,
-        main_content_only: bool = True,
-        use_trafilatura: bool = True,
-        headless: bool = True,
-        google_search: bool = True,
-        real_chrome: bool = False,
-        wait: int | float = 0,
-        proxy: Optional[str | Dict[str, str]] = None,
-        timezone_id: str | None = None,
-        locale: str | None = None,
-        extra_headers: Optional[Dict[str, str]] = None,
-        useragent: Optional[str] = None,
-        cdp_url: Optional[str] = None,
-        timeout: int | float = 30000,
-        disable_resources: bool = False,
-        wait_selector: Optional[str] = None,
-        cookies: Sequence[SetCookieParam] | None = None,
-        network_idle: bool = False,
-        wait_selector_state: SelectorWaitStates = "attached",
-        session_id: Optional[str] = None,
-    ) -> ResponseModel:
-        """Dynamic content via Playwright browser. Handles JS-rendered pages, low-mid protection.
-        For high protection / Cloudflare, use stealthy_fetch or smart_fetch instead.
-
-        :param url: The URL to fetch.
-        :param extraction_type: Content format: 'markdown', 'html', 'text', 'article', 'structured'.
-        :param css_selector: CSS selector to narrow content.
-        :param main_content_only: Strip nav/ads/footers (default True).
-        :param use_trafilatura: Use Trafilatura for article extraction (default True).
-        :param headless: Run browser in headless mode (default True).
-        :param google_search: Set Google referer header (default True).
-        :param real_chrome: Use installed Chrome instead of Chromium.
-        :param wait: Milliseconds to wait after page load.
-        :param proxy: Proxy to use.
-        :param timezone_id: Browser timezone.
-        :param locale: Browser locale, e.g., 'en-GB'.
-        :param extra_headers: Extra request headers.
-        :param useragent: Custom user agent.
-        :param cdp_url: Connect via CDP URL.
-        :param timeout: Timeout in milliseconds (default 30000).
-        :param disable_resources: Drop font/image/media/stylesheet requests.
-        :param wait_selector: CSS selector to wait for.
-        :param cookies: Cookies to set.
-        :param network_idle: Wait for no network connections for 500ms.
-        :param wait_selector_state: Selector wait state.
-        :param session_id: Reuse existing browser session.
-        """
-        url = validate_url(url)
-        validate_css_selector(css_selector)
-        validate_headers(extra_headers)
-        validate_proxy(proxy)
-
-        t0 = now()
-        bulk = await self.bulk_fetch(
-            urls=[url], extraction_type=extraction_type, css_selector=css_selector,
-            main_content_only=main_content_only, use_trafilatura=use_trafilatura,
-            headless=headless, google_search=google_search, real_chrome=real_chrome,
-            wait=wait, proxy=proxy, timezone_id=timezone_id, locale=locale,
-            extra_headers=extra_headers, useragent=useragent, cdp_url=cdp_url,
-            timeout=timeout, disable_resources=disable_resources,
-            wait_selector=wait_selector, cookies=cookies, network_idle=network_idle,
-            wait_selector_state=wait_selector_state, session_id=session_id,
-        )
-        result = bulk.results[0]
-        result.duration_ms = (now() - t0) * 1000
-        return result
-
-    async def bulk_fetch(
-        self,
-        urls: List[str],
-        extraction_type: ExtendedExtractionType = "markdown",
-        css_selector: Optional[str] = None,
-        main_content_only: bool = True,
-        use_trafilatura: bool = True,
-        headless: bool = True,
-        google_search: bool = True,
-        real_chrome: bool = False,
-        wait: int | float = 0,
-        proxy: Optional[str | Dict[str, str]] = None,
-        timezone_id: str | None = None,
-        locale: str | None = None,
-        extra_headers: Optional[Dict[str, str]] = None,
-        useragent: Optional[str] = None,
-        cdp_url: Optional[str] = None,
-        timeout: int | float = 30000,
-        disable_resources: bool = False,
-        wait_selector: Optional[str] = None,
-        cookies: Sequence[SetCookieParam] | None = None,
-        network_idle: bool = False,
-        wait_selector_state: SelectorWaitStates = "attached",
-        session_id: Optional[str] = None,
-    ) -> BulkResponseModel:
-        """Async parallel dynamic fetch via Playwright. Handles JS-rendered pages.
-
-        :param urls: List of URLs to fetch.
-        :param extraction_type: Content format: 'markdown', 'html', 'text', 'article', 'structured'.
-        :param css_selector: CSS selector to narrow content.
-        :param main_content_only: Strip nav/ads/footers (default True).
-        :param use_trafilatura: Use Trafilatura for article extraction (default True).
-        :param headless: Run browser in headless mode (default True).
-        :param google_search: Set Google referer header (default True).
-        :param real_chrome: Use installed Chrome instead of Chromium.
-        :param wait: Milliseconds to wait after page load.
-        :param proxy: Proxy to use.
-        :param timezone_id: Browser timezone.
-        :param locale: Browser locale.
-        :param extra_headers: Extra request headers.
-        :param useragent: Custom user agent.
-        :param cdp_url: Connect via CDP URL.
-        :param timeout: Timeout in milliseconds (default 30000).
-        :param disable_resources: Drop unnecessary resource requests.
-        :param wait_selector: CSS selector to wait for.
-        :param cookies: Cookies to set.
-        :param network_idle: Wait for no network connections for 500ms.
-        :param wait_selector_state: Selector wait state.
-        :param session_id: Reuse existing browser session.
-        """
-        urls = [validate_url(u) for u in urls]
-        if len(urls) > MAX_BULK_URLS:
-            raise ValueError(f"Too many URLs ({len(urls)}). Maximum is {MAX_BULK_URLS} per call.")
-        validate_css_selector(css_selector)
-        validate_headers(extra_headers)
-        validate_proxy(proxy)
-        validate_css_selector(wait_selector)
-
-        if not _browser_deps_available():
-            raise RuntimeError(
-                f"Dynamic fetch requires browser deps which are unavailable: "
-                f"{_browser_import_error or 'patchright not importable'}. "
-                "Install with: pip install hound-mcp[all]"
-            )
-
-        use_tf = use_trafilatura and extraction_type in ("markdown", "text", "article", "structured")
-
-        if session_id:
-            entry = await self._get_session(session_id, "dynamic")
-            timed_tasks = [
-                _timed(entry.session.fetch(
-                    url, wait=wait, timeout=timeout, google_search=google_search,
-                    extra_headers=extra_headers, disable_resources=disable_resources,
-                    wait_selector=wait_selector, wait_selector_state=wait_selector_state,
-                    network_idle=network_idle, proxy=proxy,
-                ))
-                for url in urls
-            ]
-            timed_responses = await gather(*timed_tasks, return_exceptions=True)
-        else:
-            from master_fetch.browser import DynamicBrowser
-            async with DynamicBrowser(
-                wait=wait, proxy=proxy, locale=locale, timeout=timeout,
-                cookies=cookies, cdp_url=cdp_url, headless=headless,
-                block_ads=True, max_pages=len(urls), useragent=useragent,
-                timezone_id=timezone_id, real_chrome=real_chrome,
-                network_idle=network_idle, wait_selector=wait_selector,
-                google_search=google_search, extra_headers=extra_headers,
-                disable_resources=disable_resources,
-                wait_selector_state=wait_selector_state,
-            ) as session:
-                timed_tasks = [_timed(session.fetch(url)) for url in urls]
-                timed_responses = await gather(*timed_tasks, return_exceptions=True)
-
-        results = []
-        for i, resp in enumerate(timed_responses):
-            if isinstance(resp, BaseException):
-                results.append(_with_agent_hints(ResponseModel(
-                    url=urls[i], status=0,
-                    content=[f"[Fetch error: {redact_api_key(str(resp)[:200])}]"],
-                    fetcher_used="dynamic", error=redact_api_key(str(resp)[:200]),
-                )))
-            else:
-                page, elapsed = resp
-                results.append(_with_agent_hints(_annotate_quality(
-                        _translate_response(
-                            page, extraction_type, css_selector, main_content_only, use_tf, "dynamic", elapsed,
-                        )
-                    )))
-        successful = sum(1 for r in results if r.status < 400 and not r.error)
-        return BulkResponseModel(results=results, total=len(results), successful=successful)
 
     # ─── Stealthy Fetcher (Patchright) ─────────────────────────────
 
@@ -2355,7 +2169,7 @@ class MasterFetchServer:
             async with StealthyBrowser(
                 wait=wait, proxy=proxy, locale=locale, cdp_url=cdp_url,
                 timeout=timeout, cookies=cookies, headless=headless,
-                block_ads=True, useragent=useragent, timezone_id=timezone_id,
+                useragent=useragent, timezone_id=timezone_id,
                 real_chrome=real_chrome, hide_canvas=hide_canvas,
                 allow_webgl=allow_webgl, network_idle=network_idle,
                 block_webrtc=block_webrtc, wait_selector=wait_selector,
@@ -2387,56 +2201,6 @@ class MasterFetchServer:
 
     # ─── SMART FETCH (The One Tool To Rule Them All) ────────────────
 
-    async def _http_with_retry(self, url: str, **kwargs) -> ResponseModel:
-        """HTTP fetch with retry logic for transient network failures.
-
-        Does NOT retry on validation errors (SecurityError/ValueError) — those
-        are deterministic (bad URL, oversized response, blocked scheme) and
-        retrying just re-downloads the same failure. Only network/transport
-        errors are retried with exponential backoff.
-        """
-        max_retries = 3
-        base_delay = 1.0
-        last_error = None
-        for attempt in range(max_retries + 1):
-            try:
-                return await self.get(url, **kwargs)
-            except (SecurityError, ValueError):
-                # Deterministic failure — surface immediately, no retry.
-                raise
-            except Exception as e:
-                last_error = e
-                if attempt < max_retries:
-                    delay = base_delay * (2 ** attempt)
-                    logger.warning(
-                        f"HTTP fetch attempt {attempt + 1} failed for {url}: "
-                        f"{redact_api_key(str(e)[:200])}. Retrying in {delay:.0f}s..."
-                    )
-                    await asyncio_sleep(delay)
-                else:
-                    logger.error(
-                        f"HTTP fetch failed after {max_retries + 1} attempts for "
-                        f"{url}: {redact_api_key(str(e)[:200])}"
-                    )
-        return ResponseModel(
-            url=url,
-            content=[
-                f"[Network error] Failed to fetch {url} after {max_retries + 1} "
-                f"attempts.\n"
-                f"Error: {redact_api_key(str(last_error)[:500])}\n"
-                f"\n"
-                f"Tips:\n"
-                f"- Check that the URL is publicly accessible.\n"
-                f"- If the site requires JavaScript, smart_fetch will auto-escalate to a browser.\n"
-                f"- If behind Cloudflare, smart_fetch will try stealthy mode with the Cloudflare solver."
-            ],
-            status=0, fetcher_used="none", cached=False,
-            extracted_type=kwargs.get("extraction_type", "markdown"),
-            session_id="", duration_ms=0,
-            error=redact_api_key(str(last_error)[:200]),
-            retry_count=max_retries + 1,
-        )
-
     @_smart_fetch_request_context
     async def smart_fetch(
         self,
@@ -2448,7 +2212,6 @@ class MasterFetchServer:
         use_trafilatura: Annotated[bool, Field(description="Use Trafilatura for cleaner article extraction (default True).")] = True,
         cache_ttl: Annotated[int, Field(description="Cache duration in seconds. Default 3600 (1 hour). Set 0 to skip cache and force a fresh fetch.")] = DEFAULT_TTL,
         force_fetcher: Annotated[Optional[Literal["http", "dynamic", "stealthy"]], Field(description="Lock to one fetcher tier. 'http' = fast HTTP-only, 'dynamic' = Playwright JS rendering, 'stealthy' = Cloudflare bypass. Skips auto-escalation.")] = None,
-        respect_robots: Annotated[bool, Field(description="Check robots.txt before fetching (default False).")] = False,
         headless: Annotated[bool, Field(description="Run browser without visible window (default True).")] = True,
         real_chrome: Annotated[bool, Field(description="Use installed Chrome instead of bundled browser.")] = False,
         wait: Annotated[int | float, Field(description="Extra milliseconds to wait after page load for JS rendering.")] = 0,
@@ -2499,7 +2262,7 @@ class MasterFetchServer:
                 raise ValueError("actions are not supported in bulk mode; call smart_fetch once per URL")
             return await self._smart_fetch_bulk(
                 urls, extraction_type, css_selector, main_content_only,
-                use_trafilatura, cache_ttl, force_fetcher, respect_robots,
+                use_trafilatura, cache_ttl, force_fetcher,
                 headless, real_chrome, wait, proxy, timeout, network_idle,
                 solve_cloudflare, block_webrtc, hide_canvas, extra_headers,
                 useragent, cookies, max_content_chars, include_media, include_links,
@@ -2549,11 +2312,6 @@ class MasterFetchServer:
                     fetcher_used="none", error=f"schema validation error: {se}",
                 )
             # Robots.txt compliance (must check before fetching)
-            if respect_robots and not await is_allowed(url):
-                return ResponseModel(
-                    url=url, status=0, content=[""],
-                    fetcher_used="none", error="robots_txt_disallowed",
-                )
             html_result = await self._auto_escalate(
                 url, "html", css_selector, main_content_only,
                 use_trafilatura, cache_ttl, 0, headless, real_chrome, wait,
@@ -2571,20 +2329,6 @@ class MasterFetchServer:
                 html_result.content = [_json_mod.dumps(structured, ensure_ascii=False, indent=2)]
                 html_result.extracted_type = "structured"
             return html_result
-
-        # 1. Check robots.txt compliance
-        if respect_robots and not await is_allowed(url):
-            disallowed = ResponseModel(
-                url=url,
-                content=[
-                    f"[Blocked by robots.txt] The URL '{url}' is disallowed by the "
-                    f"site's robots.txt policy. Set respect_robots=False to bypass."
-                ],
-                status=403, fetcher_used="none", cached=False,
-                extracted_type=extraction_type, session_id="",
-                duration_ms=0, error="robots_txt_disallowed",
-            )
-            return _apply_chunking(disallowed, max_chars=mc)
 
         # 2. Check cache
         if cache_ttl > 0:
@@ -2670,7 +2414,7 @@ class MasterFetchServer:
 
     async def _smart_fetch_bulk(
         self, urls, extraction_type, css_selector, main_content_only,
-        use_trafilatura, cache_ttl, force_fetcher, respect_robots,
+        use_trafilatura, cache_ttl, force_fetcher,
         headless, real_chrome, wait, proxy, timeout, network_idle,
         solve_cloudflare, block_webrtc, hide_canvas, extra_headers,
         useragent, cookies, max_chars: int = MAX_CONTENT_CHARS,
@@ -2694,7 +2438,7 @@ class MasterFetchServer:
                     url=u, extraction_type=extraction_type,
                     css_selector=css_selector, main_content_only=main_content_only,
                     use_trafilatura=use_trafilatura, cache_ttl=cache_ttl,
-                    force_fetcher=force_fetcher, respect_robots=respect_robots,
+                    force_fetcher=force_fetcher,
                     headless=headless, real_chrome=real_chrome, wait=wait,
                     proxy=proxy, timeout=timeout, network_idle=network_idle,
                     solve_cloudflare=solve_cloudflare, block_webrtc=block_webrtc,
@@ -2751,7 +2495,7 @@ class MasterFetchServer:
             # The shared auto-session is direct, so a proxied request must use
             # the one-off path where stealthy_fetch constructs the browser
             # with the requested proxy.
-            ssid = None if proxy else await self._ensure_auto_session("stealthy")
+            ssid = None if proxy else await self._ensure_auto_session()
             result = await self.stealthy_fetch(
                 url, extraction_type=extraction_type,
                 css_selector=css_selector, main_content_only=main_content_only,
@@ -2797,7 +2541,7 @@ class MasterFetchServer:
                 return None
 
             # 2. Fetch the snapshot page via HTTP tier
-            snap_resp = await self._http_with_retry(
+            snap_resp = await self.get(
                 snapshot_url, extraction_type=extraction_type,
                 css_selector=css_selector, main_content_only=main_content_only,
                 use_trafilatura=use_trafilatura, timeout=15,
@@ -2872,7 +2616,7 @@ class MasterFetchServer:
         _effective_http_timeout = http_timeout
         if _domain in _SLOW_HTTP_DOMAINS or any(_domain.endswith("." + d) for d in _SLOW_HTTP_DOMAINS):
             _effective_http_timeout = max(http_timeout, 20)  # at least 20s for Q&A sites
-        result = await self._http_with_retry(
+        result = await self.get(
             url, extraction_type=extraction_type,
             css_selector=css_selector, main_content_only=main_content_only,
             use_trafilatura=use_trafilatura,
@@ -2936,7 +2680,7 @@ class MasterFetchServer:
         remaining = max(timeout - int((now() - start_time) * 1000), 5000)
         # Playwright fixes the proxy when the browser context starts. Do not
         # route a proxied request through the shared direct auto-session.
-        ssid = None if proxy else await self._ensure_auto_session("stealthy")
+        ssid = None if proxy else await self._ensure_auto_session()
         result = await self.stealthy_fetch(
             url, extraction_type=extraction_type,
             css_selector=css_selector, main_content_only=main_content_only,
@@ -3028,7 +2772,6 @@ class MasterFetchServer:
             return CacheInfoModel(message=f"Cleared all {count} cache entries.", purged=count)
         else:
             count = await clear_cache()
-            await clear_robots_cache()
             return CacheInfoModel(
                 message=f"Cleared {count} expired cache entries.", purged=count,
             )
@@ -3104,57 +2847,85 @@ class MasterFetchServer:
             content_ok=True,
         )
 
-    # ─── Monitor ────────────────────────────────────────────────────
+    # ─── Feed ─────────────────────────────────────────────────────
 
-    async def smart_monitor(
+    async def feed_fetch(
         self,
-        url: Annotated[str, Field(description="URL to monitor for content changes.")],
-        action: Annotated[str, Field(description="Action: 'check' (fetch + compare + update snapshot), 'list' (show all monitored URLs), 'check_all' (batch-check ALL monitored URLs, returns change summary).") ] = "check",
-    ):
-        """Monitor a web page for content changes. Call periodically to detect updates.
+        urls: Annotated[List[str], Field(description="One or more RSS/Atom feed URLs to fetch.")],
+        max_items: Annotated[Optional[int], Field(description="Max entries per feed (default 20; 0 = all).")] = 20,
+        timeout: Annotated[Optional[int], Field(description="Per-feed timeout in seconds (default 20).")] = 20,
+    ) -> List[Any]:
+        """Fetch RSS/Atom feeds and return their latest entries.
 
-        check: fetches the page, compares with last snapshot, reports diff.
-        list: returns all monitored URLs with their last check status.
-        check_all: batch-checks ALL monitored URLs in one call. Returns which changed/unchanged/errored.
-            Use this for periodic polling (e.g. agent calls it every N minutes).
+        One call pulls the newest items from many feeds (tracking what a source
+        has published, vs. fetching a page and reading it). Each feed is parsed
+        independently — a dead feed never fails the batch. Entries come back
+        newest-first with title/url/published/summary.
+
+        WHEN TO USE: following changelogs, docs updates, release notes, news
+        sites, or any source with a feed URL. For a single page, use smart_fetch.
         """
-        from master_fetch.monitor import monitor_check, monitor_list, monitor_check_all, MonitorResponse
-        if action == "list":
-            items = await monitor_list()
-            return {"monitors": items, "total": len(items)}
-        if action == "check_all":
-            return await monitor_check_all(self)
-        # Security: validate URL at the entry point (defense in depth)
+        from master_fetch.feed import fetch_feeds
+        urls = [u for u in urls if u and u.strip()]
+        if not urls:
+            raise ValueError("feed_fetch requires at least one URL")
+        if len(urls) > 50:
+            raise ValueError("feed_fetch supports at most 50 URLs per call")
+        results = await fetch_feeds(urls, timeout=timeout or 20, max_items=max_items if max_items is not None else 20)
+        return [
+            {
+                "source_url": r.source_url,
+                "source_title": r.source_title,
+                "error": r.error,
+                "items": [i.model_dump() for i in r.items],
+            }
+            for r in results
+        ]
+
+    # ─── URL resolution ────────────────────────────────────────────
+
+    async def resolve_url(
+        self,
+        url: Annotated[str, Field(description="URL to resolve (follows redirects without downloading the page).")],
+        timeout: Annotated[Optional[int], Field(description="Timeout in seconds (default 15).")] = 15,
+    ) -> dict:
+        """Resolve a URL to its final destination without fetching the page body.
+
+        Follows redirects (short links, tracking chains, canonical jumps) and
+        returns the final URL + status + content type. Cheaper than smart_fetch
+        when you only need to know where a link lands — use it to pre-screen
+        search results before deciding which pages to actually fetch.
+
+        WHEN TO USE: t.co/bit.ly short links, redirect-heavy search results,
+        checking whether a link is alive (200) or dead (404/410) before fetching.
+        """
+        from master_fetch.fetcher import HTTPSession
         from master_fetch.security import validate_url, SecurityError
         try:
             url = validate_url(url)
         except SecurityError as se:
-            return MonitorResponse(url=url, status="error", error=str(se))
-        # action == "check"
-        return await monitor_check(self, url)
-
-    # ─── Research ──────────────────────────────────────────────────
-
-    async def smart_research(
-        self,
-        query: str,
-        max_sources: int = 3,
-        max_paragraphs: int = 20,
-        cache_ttl: int = 300,
-    ):
-        """Rule-driven research: search + fetch top results + merge relevant paragraphs.
-
-        One call does what an agent would do in 5+ calls:
-        search(query) -> pick high-relevance URLs -> fetch each with focus=query
-        -> deduplicate paragraphs -> return structured report.
-
-        No LLM. $0. Returns sources + merged_paragraphs.
-        """
-        from master_fetch.research import smart_research as _smart_research
-        return await _smart_research(
-            self, query, max_sources=max_sources,
-            max_paragraphs=max_paragraphs, cache_ttl=cache_ttl,
-        )
+            return {"original_url": url, "final_url": "", "status": 0,
+                    "content_type": "", "error": str(se)}
+        try:
+            async with HTTPSession(stealthy_headers=False, retries=1, timeout=timeout or 15) as session:
+                resp = await session.get(url, follow_redirects="safe")
+            final_url = getattr(resp, "url", "") or url
+            status = getattr(resp, "status", 0)
+            ct = ""
+            for k, v in (getattr(resp, "headers", {}) or {}).items():
+                if k.lower() == "content-type":
+                    ct = v
+                    break
+            return {
+                "original_url": url,
+                "final_url": final_url,
+                "status": status,
+                "content_type": ct,
+                "error": "",
+            }
+        except Exception as e:
+            return {"original_url": url, "final_url": "", "status": 0,
+                    "content_type": "", "error": f"{type(e).__name__}: {str(e)[:200]}"}
 
     # ─── Search ────────────────────────────────────────────────────
 
@@ -3259,7 +3030,6 @@ class MasterFetchServer:
         max_total_chars: Optional[int] = None,
         concurrency: int = 3,
         cache_ttl: int = DEFAULT_TTL,
-        respect_robots: bool = False,
         force_fetcher: Optional[str] = None,
         timeout: int = 30000,
         deadline_ms: int = 120000,
@@ -3290,7 +3060,7 @@ class MasterFetchServer:
                 discover_only=discover_only, focus=focus, crawl_urls=crawl_urls,
                 max_content_chars_per=max_content_chars_per,
                 max_total_chars=max_total_chars, concurrency=concurrency,
-                cache_ttl=cache_ttl, respect_robots=respect_robots,
+                cache_ttl=cache_ttl,
                 force_fetcher=force_fetcher, timeout=timeout,
                 deadline_ms=deadline_ms, sitemap=sitemap, search=search,
             )
@@ -3323,7 +3093,7 @@ class MasterFetchServer:
                     "focus": {"type": "string", "description": "Query-focused extraction: only BM25-relevant blocks returned. Context saver on long pages. Post-cache (no re-fetch). Re-pass same focus when paginating."},
                     "actions": {"type": "array", "items": {"type": "object", "additionalProperties": True}, "description": "Page interactions on stealthy browser AFTER load, BEFORE extraction. Forces stealthy + bypasses cache. Each item: {click:'css'}, {fill:{selector:'css',text:'x'}}, {press:'Enter'}, {wait:500}, {scroll:3}, {wait_selector:'css'}. Use for load-more, search forms, pagination, infinite scroll."},
                     "schema": {"type": "object", "description": "JSON schema for structured data extraction. Each property can have a 'selector' (CSS) for direct DOM extraction. Returns structured JSON instead of markdown. No LLM needed.", "additionalProperties": True},
-                    "options": {"type": "object", "description": "include_links (bool,false: response.links=citations/navigation/external+primary_source), include_media (bool,false: up to 20 page image URLs), proxy (str|dict), cookies (list), extra_headers (dict), useragent (str), wait (ms,0), network_idle (bool,SPAs), headless (bool,true), respect_robots (bool,false), real_chrome/solve_cloudflare/block_webrtc/hide_canvas/main_content_only/use_trafilatura (anti-detect tuning, good defaults, rarely needed).", "additionalProperties": True},
+                    "options": {"type": "object", "description": "include_links (bool,false: response.links=citations/navigation/external+primary_source), include_media (bool,false: up to 20 page image URLs), proxy (str|dict), cookies (list), extra_headers (dict), useragent (str), wait (ms,0), network_idle (bool,SPAs), headless (bool,true), real_chrome/solve_cloudflare/block_webrtc/hide_canvas/main_content_only/use_trafilatura (anti-detect tuning, good defaults, rarely needed).", "additionalProperties": True},
                 },
             },
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
@@ -3339,7 +3109,7 @@ class MasterFetchServer:
                     "focus": {"type": "string", "description": "Query: prioritize crawling links relevant to this + focus-filter each page. Token saver on doc sites."},
                     "crawl_urls": {"type": "array", "items": {"type": "string"}, "description": "Chosen subset of URLs to fetch (second-phase selective crawl, no re-discovery). Use after sitemap=true or discover_only=true."},
                     "search": {"type": "string", "description": "Filter discovered/crawled URLs by keyword match (URL path + title). Use with discover_only=true for fast URL discovery on large sites."},
-                    "options": {"type": "object", "description": "sitemap (true|'auto'|false,false: true=map from sitemap.xml in one fetch; 'auto'=use if present else BFS), max_pages (1-100,10), max_depth (0-5,2), path_include (list of path prefixes), path_exclude (list to skip), max_content_chars_per (8000), max_total_chars (token budget), concurrency (1-5,3), cache_ttl (3600;0=fresh), respect_robots (false), force_fetcher ('http'|'stealthy'), timeout (ms,30000), deadline_ms (120000).", "additionalProperties": True},
+                    "options": {"type": "object", "description": "sitemap (true|'auto'|false,false: true=map from sitemap.xml in one fetch; 'auto'=use if present else BFS), max_pages (1-100,10), max_depth (0-5,2), path_include (list of path prefixes), path_exclude (list to skip), max_content_chars_per (8000), max_total_chars (token budget), concurrency (1-5,3), cache_ttl (3600;0=fresh), force_fetcher ('http'|'stealthy'), timeout (ms,30000), deadline_ms (120000).", "additionalProperties": True},
                 },
             },
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
@@ -3398,27 +3168,26 @@ class MasterFetchServer:
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False},
         },
         {
-            "name": "smart_monitor",
-            "description": "Monitor a web page for content changes. Call periodically to detect updates. check: fetches the page, compares with last snapshot, reports diff. list: returns all monitored URLs with their last check status.",
+            "name": "feed_fetch",
+            "description": "Fetch RSS/Atom feeds and return their latest entries (newest-first: title/url/published/summary) per feed. Batch: pass multiple feed URLs; each feed is parsed independently, a dead feed never fails the batch.",
             "inputSchema": {
-                "type": "object",
+                "type": "object", "required": ["urls"],
                 "properties": {
-                    "url": {"type": "string", "description": "URL to monitor for content changes. Required for action='check', not needed for action='list'."},
-                    "action": {"type": "string", "enum": ["check", "list", "check_all"], "description": "Action: 'check' (fetch + compare + update snapshot), 'list' (show all monitored URLs), 'check_all' (batch-check ALL monitored URLs, returns change summary). Default: check."},
+                    "urls": {"type": "array", "items": {"type": "string"}, "description": "One or more RSS/Atom feed URLs"},
+                    "max_items": {"type": "integer", "description": "Max entries per feed (default 20; 0 = all)"},
+                    "timeout": {"type": "integer", "description": "Per-feed timeout in seconds (default 20)"},
                 },
             },
-            "annotations": {"readOnlyHint": True, "idempotentHint": False, "openWorldHint": True},
+            "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
         },
         {
-            "name": "smart_research",
-            "description": "Rule-driven research: search + fetch top results + merge relevant paragraphs. One call replaces 5+ manual steps (search -> pick URLs -> fetch each -> extract -> merge). No LLM, $0. Returns sources with relevant_content + merged deduplicated paragraphs. Use for factual questions needing multiple sources.",
+            "name": "resolve_url",
+            "description": "Resolve a URL to its final destination (follows redirects without downloading the page body). Returns final_url + status + content_type. Use to pre-screen short links / redirect-heavy search results before deciding what to fetch.",
             "inputSchema": {
-                "type": "object", "required": ["query"],
+                "type": "object", "required": ["url"],
                 "properties": {
-                    "query": {"type": "string", "description": "Research question or topic"},
-                    "max_sources": {"type": "integer", "description": "Max pages to fetch (1-5, default 3)"},
-                    "max_paragraphs": {"type": "integer", "description": "Max merged paragraphs to return (default 20)"},
-                    "cache_ttl": {"type": "integer", "description": "Cache seconds for search+fetch (default 300)"},
+                    "url": {"type": "string", "description": "URL to resolve"},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds (default 15)"},
                 },
             },
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
@@ -3575,7 +3344,7 @@ class MasterFetchServer:
             password = args.get("password") if args.get("password") is not None else options.get("password")
             kw = {k: v for k, v in options.items() if k in (
                 "proxy", "cookies", "extra_headers", "useragent",
-                "wait", "network_idle", "headless", "real_chrome", "respect_robots",
+                "wait", "network_idle", "headless", "real_chrome",
                 "main_content_only", "use_trafilatura", "solve_cloudflare", "block_webrtc", "hide_canvas",
                 "include_media", "include_links",
             )}
@@ -3600,7 +3369,7 @@ class MasterFetchServer:
             kw = {k: v for k, v in options.items() if k in (
                 "max_pages", "max_depth", "path_include", "path_exclude",
                 "max_content_chars_per", "max_total_chars", "concurrency",
-                "cache_ttl", "respect_robots", "force_fetcher", "timeout",
+                "cache_ttl", "force_fetcher", "timeout",
                 "deadline_ms", "sitemap",
             )}
             result = await self.smart_crawl(
@@ -3638,21 +3407,22 @@ class MasterFetchServer:
             result = await self.parse(file_path=args["file_path"])
             return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
 
-        elif name == "smart_monitor":
-            result = await self.smart_monitor(url=args.get("url", ""), action=args.get("action", "check"))
-            if isinstance(result, dict):
-                import json as _j
-                return [TextContent(type="text", text=_j.dumps(result, ensure_ascii=False))], result
-            return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
-
-        elif name == "smart_research":
-            result = await self.smart_research(
-                query=args["query"],
-                max_sources=args.get("max_sources", 3),
-                max_paragraphs=args.get("max_paragraphs", 20),
-                cache_ttl=args.get("cache_ttl", 300),
+        elif name == "feed_fetch":
+            import json as _j
+            result = await self.feed_fetch(
+                urls=args["urls"],
+                max_items=args.get("max_items", 20),
+                timeout=args.get("timeout", 20),
             )
-            return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
+            return [TextContent(type="text", text=_j.dumps(result, ensure_ascii=False))], result
+
+        elif name == "resolve_url":
+            import json as _j
+            result = await self.resolve_url(
+                url=args["url"],
+                timeout=args.get("timeout", 15),
+            )
+            return [TextContent(type="text", text=_j.dumps(result, ensure_ascii=False))], result
 
         else:
             raise ValueError(f"Unknown tool: {name}")
@@ -3668,9 +3438,6 @@ def _help_epilog() -> str:
         f"  {ui.cyan('hound --http')}       {ui.dim('serve · streamable HTTP (Open WebUI), use --host/--port')}",
         f"  {ui.cyan('hound -v')}           {ui.dim('version + update check')}",
         f"  {ui.cyan('hound -u')}           {ui.dim('update to the latest version')}",
-        f"  {ui.cyan('hound --reinstall')}  {ui.dim('full reinstall with all deps + [all] extras')}",
-        f"  {ui.cyan('hound --doctor')}     {ui.dim('health check + fix advice')}",
-        f"  {ui.cyan('hound --rollback')}   {ui.dim('undo the last update')}",
         "",
         ui.dim("docs:") + "  " + ui.cyan("https://github.com/dondai1234/master-fetch"),
     ])
@@ -3699,94 +3466,13 @@ def main():
                         help="show version + update status")
     parser.add_argument("-u", "--update", action="store_true",
                         help="update hound to the latest version")
-    parser.add_argument("--doctor", action="store_true",
-                        help="diagnose the install and suggest fixes")
-    parser.add_argument("--rollback", action="store_true",
-                        help="reinstall the version from before the last update")
-    parser.add_argument("--reinstall", action="store_true",
-                        help="full reinstall with all deps + [all] extras")
-
-    proxy_parser = parser.add_subparsers(dest="proxy_cmd", help="manage search proxies for IP rotation")
-    proxy_cmd = proxy_parser.add_parser("proxy", help="manage search proxies for IP rotation")
-    proxy_sub = proxy_cmd.add_subparsers(dest="proxy_action", help="proxy sub-command")
-    proxy_add = proxy_sub.add_parser("add", help="add a proxy (format: http://ip:port or socks5://user:pass@ip:port)")
-    proxy_add.add_argument("proxies", nargs="+", help="one or more proxy URLs to add")
-    proxy_list = proxy_sub.add_parser("list", help="list configured proxies (redacted)")
-    proxy_remove = proxy_sub.add_parser("remove", help="remove a proxy by index")
-    proxy_remove.add_argument("index", type=int, help="proxy index (0-based, see 'hound proxy list')")
-    proxy_clear = proxy_sub.add_parser("clear", help="remove all proxies")
     args = parser.parse_args()
-
-    # Sweep a stale launcher left by a previous `hound -u` (Windows only).
-    updater.cleanup_old_launcher()
 
     if args.update:
         updater.do_update()
         return
-    if args.reinstall:
-        updater.reinstall()
-        return
-    if args.rollback:
-        updater.rollback()
-        return
-    if args.doctor:
-        updater.doctor()
-        return
     if args.version:
         updater.print_version()
-        return
-
-    if getattr(args, "proxy_action", None):
-        from master_fetch.search_proxy import (
-            add_proxy, list_proxies, remove_proxy, clear_proxies,
-            redact_proxy, load_proxies, MAX_PROXIES,
-        )
-        action = args.proxy_action
-        if action == "add":
-            added = 0
-            for proxy_url in args.proxies:
-                try:
-                    count = add_proxy(proxy_url)
-                    added += 1
-                    print(f"  {ui.ok('OK')} Added {redact_proxy(proxy_url)} ({count}/{MAX_PROXIES})")
-                except ValueError as e:
-                    print(f"  {ui.red('ERROR')} {e}")
-            if added:
-                print(f"  Config: ~/.hound/search_proxies.json")
-                print(f"  Rotation: each search uses the next proxy, cycling through all {count}.")
-            return
-        if action == "list":
-            # Show config file proxies + env var proxies (merged).
-            all_proxies = load_proxies()
-            if not all_proxies:
-                print(ui.dim("  No search proxies configured."))
-                print(ui.dim("  Add with: hound proxy add http://ip:port"))
-                print(ui.dim("  Format: http://ip:port, https://ip:port, socks5://ip:port"))
-                print(ui.dim("  With auth: http://user:pass@ip:port"))
-                return
-            print(ui.branded(ui.cyan("Search Proxy Pool"), ui.dim("~/.hound/search_proxies.json")))
-            for i, p in enumerate(all_proxies):
-                print(f"  [{i}] {redact_proxy(p)}")
-            print(f"")
-            print(ui.dim(f"  Rotation: each search call uses the next proxy, cycling through all {len(all_proxies)}."))
-            print(ui.dim(f"  Pool size: {len(all_proxies)}/{MAX_PROXIES}"))
-            return
-        if action == "remove":
-            try:
-                removed = remove_proxy(args.index)
-                print(f"  {ui.ok('OK')} Removed [{args.index}] {redact_proxy(removed)}")
-            except (IndexError, ValueError) as e:
-                print(f"  {ui.red('ERROR')} {e}")
-                return 1
-            return
-        if action == "clear":
-            removed = clear_proxies()
-            if removed:
-                print(f"  {ui.ok('OK')} Removed {removed} proxy(s)")
-            else:
-                print(ui.dim("  No proxies to remove."))
-            return
-        proxy_cmd.print_help()
         return
 
     # HTTP mode: stdout is free (not an MCP stdio pipe), so a one-line banner is
