@@ -71,18 +71,18 @@ Issues = "https://github.com/ouli-1242/hound-mcp/issues"
 Changelog = "https://github.com/ouli-1242/hound-mcp/blob/master/CHANGELOG.md"
 
 [project.scripts]
-hound = "master_fetch.cli:main"
+hound = "hound_mcp.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/master_fetch"]
+packages = ["src/hound_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Always import master_fetch from src/, never from a built wheel installed in
+# Always import hound_mcp from src/, never from a built wheel installed in
 # .venv. The dev venv ships a BUILT wheel (not editable); without this, pytest
 # silently runs the stale installed copy and src/ edits go untested. This has
 # bitten the project 4+ times. pythonpath (pytest 7+) wins over install.

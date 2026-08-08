@@ -1,6 +1,6 @@
 NOTICE — vendored ddgs metasearch code
 
-The file `src/master_fetch/search_metasearch.py` in this project is derived
+The file `src/hound_mcp/search_metasearch.py` in this project is derived
 from ddgs (https://github.com/deedy5/ddgs), a metasearch library aggregating
 diverse web search services. ddgs is distributed under the MIT License
 (see below). It has been vendored, stripped to text search only, and adapted

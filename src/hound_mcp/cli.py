@@ -1,15 +1,15 @@
 """Self-healing CLI entry point for hound.
 
-This module is the pip entry point (hound = master_fetch.cli:main). It is
+This module is the pip entry point (hound = hound_mcp.cli:main). It is
 deliberately lightweight: NO heavy imports at module level. When hound.exe
-runs, it does `from master_fetch.cli import main` which imports
-`master_fetch.__init__` (just __version__, no deps) and this module (stdlib
+runs, it does `from hound_mcp.cli import main` which imports
+`hound_mcp.__init__` (just __version__, no deps) and this module (stdlib
 only). The heavy server import happens lazily inside main(), wrapped in a
 try/except that auto-recovers from a broken install.
 
 Self-heal flow:
 1. User runs `hound` (any command) after a broken update/dep change
-2. `from master_fetch.server import main` fails (ImportError/ModuleNotFoundError)
+2. `from hound_mcp.server import main` fails (ImportError/ModuleNotFoundError)
 3. cli.py catches it, checks if ~/.hound/repair.py exists
 4. If yes: runs it automatically (stops hound + force-reinstalls)
 5. If no: prints a clean one-line error (not a traceback) with the fix command
@@ -87,7 +87,7 @@ except Exception:
 def main() -> int:
     """Entry point that self-heals on broken imports."""
     try:
-        from master_fetch.server import main as _server_main
+        from hound_mcp.server import main as _server_main
         return _server_main() or 0
     except (ImportError, ModuleNotFoundError) as e:
         # Broken install: missing dep, half-failed update, etc.

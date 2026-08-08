@@ -195,7 +195,7 @@ class ProxyPool:
         NOT marked dead — a single probe failure is not proof of death.
         """
         import asyncio
-        from master_fetch.fetcher import HTTPSession
+        from hound_mcp.fetcher import HTTPSession
 
         async def _probe(proxy: str) -> tuple[str, bool]:
             try:

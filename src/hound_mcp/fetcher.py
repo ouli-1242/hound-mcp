@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 import primp
 
-logger = logging.getLogger("master_fetch.fetcher")
+logger = logging.getLogger("hound_mcp.fetcher")
 
 
 # ─── Response ────────────────────────────────────────────────────────────────

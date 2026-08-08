@@ -14,7 +14,7 @@ from pathlib import Path
 import aiosqlite
 
 # Default cache dir: next to the project
-_CACHE_DIR = Path.home() / ".master_fetch_cache"
+_CACHE_DIR = Path.home() / ".hound_mcp_cache"
 _DB_NAME = "cache.db"
 
 DEFAULT_TTL = 3600  # 1 hour

@@ -29,7 +29,7 @@ from urllib.parse import urljoin, urlparse
 
 from lxml import html as lxml_html
 
-logger = logging.getLogger("master-fetch.links")
+logger = logging.getLogger("hound-mcp.links")
 
 # Containers that count as "main content" -> links inside are citations.
 _MAIN_XPATH = ".//ancestor::article | .//ancestor::main | .//ancestor::section | .//ancestor::p | .//ancestor::li"

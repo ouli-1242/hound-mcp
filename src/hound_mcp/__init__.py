@@ -23,7 +23,7 @@ def __getattr__(name: str):
         "main",
     }
     if name in _lazy_exports:
-        from master_fetch.server import (  # noqa: E402
+        from hound_mcp.server import (  # noqa: E402
             MasterFetchServer,
             ResponseModel,
             BulkResponseModel,
@@ -34,7 +34,7 @@ def __getattr__(name: str):
             main,
         )
         return locals()[name]
-    raise AttributeError(f"module 'master_fetch' has no attribute '{name}'")
+    raise AttributeError(f"module 'hound_mcp' has no attribute '{name}'")
 
 
 __all__ = [

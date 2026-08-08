@@ -23,13 +23,13 @@ Bug report and feature request templates are available when you open a new issue
 
 ```bash
 git clone https://github.com/ouli-1242/hound-mcp.git
-cd master-fetch
+cd hound-mcp
 pip install -e .[all,dev]
 playwright install chromium
 pytest tests/
 ```
 
-The fetch engine is in `src/master_fetch/server.py`. Search is in `src/master_fetch/search.py`.
+The fetch engine is in `src/hound_mcp/server.py`. Search is in `src/hound_mcp/search.py`.
 
 ## License
 

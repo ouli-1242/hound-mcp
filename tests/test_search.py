@@ -10,9 +10,9 @@ real search results.
 import asyncio
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
-from master_fetch import search as search
-from master_fetch import search_engines as se
-from master_fetch.search_engines import (
+from hound_mcp import search as search
+from hound_mcp import search_engines as se
+from hound_mcp.search_engines import (
     _passes_site_filter, _normalize_domain, _is_domain_or_subdomain,
     RawResult, EngineReport, multi_search,
     DEFAULT_ENGINES, _INDEX_FAMILY,
@@ -187,25 +187,25 @@ class TestNormalizeDomain:
 class TestGitHubCaseFolding:
 
     def test_owner_repo_casefolded(self):
-        from master_fetch.search_metasearch import _normalize_url
+        from hound_mcp.search_metasearch import _normalize_url
         a = _normalize_url("https://github.com/nousresearch/hermes-agent")
         b = _normalize_url("https://github.com/NousResearch/hermes-agent")
         assert a == b
 
     def test_branch_case_preserved(self):
-        from master_fetch.search_metasearch import _normalize_url
+        from hound_mcp.search_metasearch import _normalize_url
         a = _normalize_url("https://github.com/NousResearch/Hermes-Agent/tree/Main")
         b = _normalize_url("https://github.com/nousresearch/hermes-agent/tree/main")
         assert a != b
 
     def test_non_github_paths_case_sensitive(self):
-        from master_fetch.search_metasearch import _normalize_url
+        from hound_mcp.search_metasearch import _normalize_url
         a = _normalize_url("https://example.com/Docs/Readme")
         b = _normalize_url("https://example.com/docs/readme")
         assert a != b
 
     def test_credential_urls_skip_folding(self):
-        from master_fetch.search_metasearch import _normalize_url
+        from hound_mcp.search_metasearch import _normalize_url
         a = _normalize_url("https://User:Secret@github.com/NousResearch/Hermes-Agent")
         b = _normalize_url("https://user:secret@github.com/nousresearch/hermes-agent")
         assert a != b
@@ -217,37 +217,37 @@ class TestGitHubReservedRoutes:
     and case can carry meaning (e.g. /topics/Python vs /topics/python)."""
 
     def test_reserved_route_not_folded(self):
-        from master_fetch.search_metasearch import _normalize_url
+        from hound_mcp.search_metasearch import _normalize_url
         a = _normalize_url("https://github.com/Settings/Keys")
         b = _normalize_url("https://github.com/settings/keys")
         assert a != b
 
     def test_topics_route_case_preserved(self):
-        from master_fetch.search_metasearch import _normalize_url
+        from hound_mcp.search_metasearch import _normalize_url
         a = _normalize_url("https://github.com/topics/Python")
         b = _normalize_url("https://github.com/topics/python")
         assert a != b
 
     def test_explore_route_case_preserved(self):
-        from master_fetch.search_metasearch import _normalize_url
+        from hound_mcp.search_metasearch import _normalize_url
         a = _normalize_url("https://github.com/Explore/Rust")
         b = _normalize_url("https://github.com/explore/rust")
         assert a != b
 
     def test_repo_still_folded_after_fix(self):
-        from master_fetch.search_metasearch import _normalize_url
+        from hound_mcp.search_metasearch import _normalize_url
         a = _normalize_url("https://github.com/NousResearch/Hermes-Agent")
         b = _normalize_url("https://github.com/nousresearch/hermes-agent")
         assert a == b
 
     def test_reserved_route_lowercased_unchanged(self):
         """Already-lowercase reserved routes should be unchanged."""
-        from master_fetch.search_metasearch import _normalize_url
+        from hound_mcp.search_metasearch import _normalize_url
         assert _normalize_url("https://github.com/topics/python") == \
                "https://github.com/topics/python"
 
     def test_multiple_reserved_routes(self):
-        from master_fetch.search_metasearch import _normalize_url
+        from hound_mcp.search_metasearch import _normalize_url
         for route in ["settings", "topics", "explore", "dashboard", "notifications",
                       "marketplace", "sponsors", "collections", "trending", "search"]:
             a = _normalize_url(f"https://github.com/{route.title()}/Sub")
@@ -401,7 +401,7 @@ class TestEngineConfig:
 class TestSearchProxyValidation:
     def _load_with(self, monkeypatch, tmp_path, env_value):
         """Load proxies from the env var + an empty config file (isolated)."""
-        from master_fetch import search_proxy as sp
+        from hound_mcp import search_proxy as sp
         if env_value is None:
             monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
         else:
@@ -444,7 +444,7 @@ class TestSearchProxyValidation:
         """If every engine fails to construct (bad deps, etc), raise an error
         instead of silently returning 0 results."""
         import asyncio
-        import master_fetch.search_metasearch as m
+        import hound_mcp.search_metasearch as m
 
         class BrokenEngine:
             disabled = False

@@ -22,7 +22,7 @@ from random import randint
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
-logger = logging.getLogger("master_fetch.browser")
+logger = logging.getLogger("hound_mcp.browser")
 
 # ─── Browser flags (ported from scrapling's constants.py) ─────────────────────
 
@@ -1224,7 +1224,7 @@ class BrowserSession:
                         logger.debug(f"Human behavior simulation error: {e}")
 
                 # Build response
-                from master_fetch.fetcher import response_from_browser_page
+                from hound_mcp.fetcher import response_from_browser_page
                 response = await response_from_browser_page(
                     page, first_response, final_response[0]
                 )
@@ -1261,7 +1261,7 @@ class BrowserSession:
                     # Classify the network error for agent-actionable diagnostics.
                     # Prepend a category tag so downstream (server.py _agent_hints)
                     # can identify the failure type without re-parsing.
-                    from master_fetch.errors import classify_network_error
+                    from hound_mcp.errors import classify_network_error
                     err_str = str(e)
                     category, _ = classify_network_error(err_str)
                     if category != "unknown":

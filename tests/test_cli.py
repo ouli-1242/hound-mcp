@@ -9,8 +9,8 @@ import os
 import sys
 import pytest
 from unittest.mock import patch, MagicMock
-from master_fetch.cli import main, _run_repair
-from master_fetch.updater import check_version, pad_version, _at_or_ahead
+from hound_mcp.cli import main, _run_repair
+from hound_mcp.updater import check_version, pad_version, _at_or_ahead
 
 
 # ─── CLI self-heal structure ───────────────────────────────────────
@@ -19,7 +19,7 @@ class TestCLIStructure:
 
     def test_cli_module_imports_only_stdlib(self):
         """cli.py must be importable without heavy deps (self-heal requirement)."""
-        import master_fetch.cli as cli
+        import hound_mcp.cli as cli
         # The module should not have imported server.py at module level
         # (it's imported lazily inside main())
         assert hasattr(cli, "main")
@@ -41,7 +41,7 @@ class TestRepairScript:
 
     def test_repair_script_path(self, tmp_path, monkeypatch):
         """repair.py should be at ~/.hound/repair.py"""
-        import master_fetch.updater as updater
+        import hound_mcp.updater as updater
         home = str(tmp_path)
         monkeypatch.setattr(os.path, "expanduser", lambda x: home)
         path = updater.repair_script_path()

@@ -34,7 +34,7 @@ import logging
 import re
 from typing import Any, Optional, Union
 
-logger = logging.getLogger("master-fetch.ocr")
+logger = logging.getLogger("hound-mcp.ocr")
 
 # Cap OCR to this many pages when the caller did not specify a page range.
 # Prevents a huge scanned PDF from hanging the call for minutes. An explicit
@@ -145,7 +145,7 @@ def ocr_pdf(
     the header tells the agent how to fetch the next batch.
     On failure: ``error`` is set and ``content`` is a human-readable explanation.
     """
-    from master_fetch.pdf_extractor import PdfResult, _parse_pages  # reuse
+    from hound_mcp.pdf_extractor import PdfResult, _parse_pages  # reuse
 
     if not body or not body[:5].startswith(b"%PDF"):
         return PdfResult(error="not_a_pdf: body does not start with %PDF",

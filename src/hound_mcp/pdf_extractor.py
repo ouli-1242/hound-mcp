@@ -46,7 +46,7 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
-logger = logging.getLogger("master-fetch.pdf")
+logger = logging.getLogger("hound-mcp.pdf")
 
 # A page is considered scanned/image-only if it yields fewer than this many
 # characters of extractable text on average.
@@ -369,7 +369,7 @@ def _ocr_pages(body: bytes, page_nums: list[int], password: Optional[str]) -> di
     if not page_nums:
         return {}
     try:
-        from master_fetch.ocr import ocr_pdf, ocr_available
+        from hound_mcp.ocr import ocr_pdf, ocr_available
     except Exception:
         return {}
     if not ocr_available():

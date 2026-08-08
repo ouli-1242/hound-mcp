@@ -19,7 +19,7 @@ import trafilatura
 from lxml.etree import tostring
 from lxml.html import fromstring as html_fromstring
 
-logger = logging.getLogger("master_fetch.trafilatura_extractor")
+logger = logging.getLogger("hound_mcp.trafilatura_extractor")
 
 
 def _is_probably_binary(data: bytes) -> bool:
@@ -291,7 +291,7 @@ def extract_html_title(html: str) -> str:
 
 
 def extract_with_trafilatura(
-    page,  # Response object (master_fetch.fetcher.Response or compatible)
+    page,  # Response object (hound_mcp.fetcher.Response or compatible)
     extraction_type: str = "markdown",
     css_selector: Optional[str] = None,
 ) -> list[str]:

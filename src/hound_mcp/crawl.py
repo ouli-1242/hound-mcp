@@ -54,7 +54,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 
 from pydantic import BaseModel, Field
 
-logger = logging.getLogger("master-fetch.crawl")
+logger = logging.getLogger("hound-mcp.crawl")
 
 # Match <a ... href="..."> and capture the href + the anchor's visible text.
 _LINK_RE = re.compile(
@@ -89,7 +89,7 @@ _JUNK_PENALTY = ("login", "signin", "sign-in", "signup", "sign-up", "register",
 def _is_transient_error(error_str: str) -> bool:
     """True if the error is transient (worth retrying). Timeout and connection
     reset may succeed on retry; connection refused and DNS failure will not."""
-    from master_fetch.errors import classify_network_error
+    from hound_mcp.errors import classify_network_error
     category, _ = classify_network_error(error_str)
     return category in ("timeout", "connection_reset", "unknown")
 
@@ -221,8 +221,8 @@ def _classify_and_extract(html: str, url: str, start_url: str, focus: Optional[s
     False only when we genuinely got nothing usable (js_shell that didn't
     render, or an empty/error page).
     """
-    from master_fetch.trafilatura_extractor import extract_content_from_html
-    from master_fetch.focus import focus_content
+    from hound_mcp.trafilatura_extractor import extract_content_from_html
+    from hound_mcp.focus import focus_content
 
     md = ""
     try:
@@ -388,10 +388,10 @@ async def _sitemap_map(url: str, path_include: Optional[list[str]],
     success (sitemap found + parsed), or None if no sitemap was reachable so the
     caller can fall back to BFS ('auto'). Same-domain + path filters applied.
     Caps the returned URL map at max(1000, max_pages*10)."""
-    from master_fetch.sitemap import discover_sitemap, SitemapURL
+    from hound_mcp.sitemap import discover_sitemap, SitemapURL
 
     def _make_http_get():
-        from master_fetch.search_proxy import get_next_proxy
+        from hound_mcp.search_proxy import get_next_proxy
         _sitemap_proxy = get_next_proxy()
         try:
             import primp  # type: ignore
@@ -508,14 +508,14 @@ async def smart_crawl(
     the site has one, else fall back to BFS. False (default) = BFS only. The
     sitemap path collapses big-site discovery (hundreds of pages) into one call.
     """
-    from master_fetch.security import validate_url, SecurityError
-    from master_fetch.trafilatura_extractor import extract_html_title
+    from hound_mcp.security import validate_url, SecurityError
+    from hound_mcp.trafilatura_extractor import extract_html_title
 
     t0 = time()
     deadline_t = t0 + (deadline_ms / 1000.0)
 
     def _err(msg: str, start: str = "") -> CrawlResponseModel:
-        from master_fetch.errors import classify_network_error
+        from hound_mcp.errors import classify_network_error
         _, hint = classify_network_error(msg)
         return CrawlResponseModel(start_url=start or url, pages=[], error=msg[:200],
                                   duration_ms=(time() - t0) * 1000,
@@ -607,7 +607,7 @@ async def smart_crawl(
         """
         async with sem:
             # Rotate through proxy pool so crawl pages don't hammer one IP.
-            from master_fetch.search_proxy import get_next_proxy, get_proxy_pool
+            from hound_mcp.search_proxy import get_next_proxy, get_proxy_pool
             _crawl_proxy = get_next_proxy()
             try:
                 resp = await server.smart_fetch(
@@ -633,11 +633,11 @@ async def smart_crawl(
                         # server.py -> crawl.py (smart_crawl). Both are
                         # function-level imports so neither module needs the
                         # other at import time.
-                        from master_fetch.server import ResponseModel
+                        from hound_mcp.server import ResponseModel
                         resp = ResponseModel(url=u, status=-1, content=[""],
                                              fetcher_used="none", error=str(e2)[:200])
                 else:
-                    from master_fetch.server import ResponseModel
+                    from hound_mcp.server import ResponseModel
                     resp = ResponseModel(url=u, status=-1, content=[""],
                                          fetcher_used="none", error=str(e)[:200])
             # Proxy health tracking: success marks the proxy healthy, a failed
@@ -829,7 +829,7 @@ async def smart_crawl(
         network_failures = sum(1 for p in pages if p.status == -1 or p.status == 0)
         if network_failures > 0 and network_failures >= len(pages) * 0.5:
             sample_errors = [p.error for p in pages if p.error][:3]
-            from master_fetch.errors import classify_network_error
+            from hound_mcp.errors import classify_network_error
             category, hint = classify_network_error(" ".join(sample_errors))
             next_action = (
                 f"{network_failures}/{len(pages)} pages failed with network errors "

@@ -30,33 +30,33 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
-from master_fetch.cache import get_cached, set_cached
-from master_fetch.security import validate_search_query, validate_url, redact_api_key, SecurityError
-from master_fetch.search_engines import (
+from hound_mcp.cache import get_cached, set_cached
+from hound_mcp.security import validate_search_query, validate_url, redact_api_key, SecurityError
+from hound_mcp.search_engines import (
     RawResult, multi_search, EngineReport, DEFAULT_ENGINES,
     fetch_source_for_similar, _INDEX_FAMILY,
 )
 
-logger = logging.getLogger("master-fetch.search")
+logger = logging.getLogger("hound-mcp.search")
 
 
 def neural_rerank(query: str, ranked: list[RawResult]):
-    from master_fetch.reranker import rerank
+    from hound_mcp.reranker import rerank
     return rerank(query, ranked)
 
 
 def unavailable_reason() -> str:
-    from master_fetch.reranker import unavailable_reason as _unavailable_reason
+    from hound_mcp.reranker import unavailable_reason as _unavailable_reason
     return _unavailable_reason()
 
 
 def get_reranker():
-    from master_fetch.reranker import get_reranker as _get_reranker
+    from hound_mcp.reranker import get_reranker as _get_reranker
     return _get_reranker()
 
 
 async def ensure_reranker(*, download: bool = True):
-    from master_fetch.reranker import ensure_reranker as _ensure_reranker
+    from hound_mcp.reranker import ensure_reranker as _ensure_reranker
     return await _ensure_reranker(download=download)
 
 

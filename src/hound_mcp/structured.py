@@ -23,7 +23,7 @@ import logging
 import re
 from typing import Any, Dict, Optional
 
-logger = logging.getLogger("master_fetch.structured")
+logger = logging.getLogger("hound_mcp.structured")
 
 
 def extract_structured(

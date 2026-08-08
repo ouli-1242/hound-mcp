@@ -38,7 +38,7 @@ def _get_metasearch():
     """
     global _metasearch
     if _metasearch is None:
-        from master_fetch.search_metasearch import metasearch as loaded
+        from hound_mcp.search_metasearch import metasearch as loaded
         _metasearch = loaded
     return _metasearch
 
@@ -116,8 +116,8 @@ async def fetch_source_for_similar(url: str, *, timeout: int = 10, max_chars: in
     impersonated HTTP fetch (primp) - a single arbitrary page, not a repeated
     engine hit, so the metasearch's backend rotation does not apply."""
     try:
-        from master_fetch.fetcher import HTTPSession
-        from master_fetch.search_metasearch import _PROXY as _p
+        from hound_mcp.fetcher import HTTPSession
+        from hound_mcp.search_metasearch import _PROXY as _p
         from urllib.parse import urlparse as _up
         from bs4 import BeautifulSoup
         # rotation pool kept here (not imported from the removed SERL module)

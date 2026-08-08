@@ -3,7 +3,7 @@
 This module owns the entire update lifecycle. The previous updater could brick
 the install: `pip install --upgrade hound-mcp[all]` pulled the heavy `[all]`
 extra (onnxruntime, tokenizers, rapidocr) which is slow and fails mid-install
-(leaving master_fetch deleted and hound.exe orphaned -> every `hound` command
+(leaving hound_mcp deleted and hound.exe orphaned -> every `hound` command
 crashes with ModuleNotFoundError, including `hound -u` itself, so the tool
 cannot self-heal). The recovery messages told users to run a bare
 `pip install --force-reinstall` while a hound server held the launcher, which
@@ -18,7 +18,7 @@ This rewrite fixes all of that:
   a heavy dep. Existing deps already satisfied are left alone by pip.
 - **Windows: a detached helper runs pip after the launcher exits.** The running
   `hound -u` command IS hound.exe, which Windows locks against overwrite. The
-  helper is a standalone `python -c` (no master_fetch dependency) that waits
+  helper is a standalone `python -c` (no hound_mcp dependency) that waits
   for the parent launcher to exit, stages the launcher aside via the rename
   trick (Windows permits renaming a running .exe, just not overwriting it), then
   runs pip with the launcher free. A still-running hound server is handled by
@@ -323,7 +323,7 @@ def _diagnose(stderr: str) -> str:
 # ─── the detached Windows helper (standalone python -c, survives brick) ────
 
 def _build_helper_source(target: str, repair_path: str, parent_pid: int, full: bool = False) -> str:
-    """Build the standalone helper source. Pure stdlib, no master_fetch import,
+    """Build the standalone helper source. Pure stdlib, no hound_mcp import,
     so it runs even if the package is mid-replacement or bricked.
 
     The helper: waits for the parent launcher to exit, stages the launcher aside
@@ -504,7 +504,7 @@ def _spawn_helper(target: str, repair_path: str, parent_pid: int, full: bool = F
 def do_update(target: str | None = None) -> None:
     """Reliable, brick-proof self-update. `target` pins a version (rollback);
     None means the latest on PyPI. See the module docstring for the design."""
-    from master_fetch import cli_ui as ui
+    from hound_mcp import cli_ui as ui
     installed, latest, _is_current = check_version()
     if target is None:
         target = latest
@@ -562,7 +562,7 @@ def do_update(target: str | None = None) -> None:
 def print_version() -> None:
     """Render `hound -v`: a compact bordered version panel (or a clean error
     panel when the install is corrupted, pointing at the safe repair path)."""
-    from master_fetch import cli_ui as ui
+    from hound_mcp import cli_ui as ui
     W = 50
     inner = W - 4
     installed, latest, is_current = check_version()

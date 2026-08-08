@@ -37,7 +37,7 @@ from urllib.parse import urljoin, urlparse
 
 from lxml import etree
 
-logger = logging.getLogger("master-fetch.sitemap")
+logger = logging.getLogger("hound-mcp.sitemap")
 
 # A transport callable: url -> (status:int, body:bytes) | None
 HttpGet = Callable[[str], Optional[tuple[int, bytes]]]

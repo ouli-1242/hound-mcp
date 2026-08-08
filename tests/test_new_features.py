@@ -2,7 +2,7 @@
 
 import pytest
 
-from master_fetch.structured import extract_structured, _extract_auto
+from hound_mcp.structured import extract_structured, _extract_auto
 
 
 # ─── Schema auto mode ─────────────────────────────────────────────────────────
@@ -80,14 +80,14 @@ class TestBatchStructured:
     def test_schema_passed_to_bulk(self):
         """Verify _smart_fetch_bulk accepts schema parameter."""
         import inspect
-        from master_fetch.server import MasterFetchServer
+        from hound_mcp.server import MasterFetchServer
         sig = inspect.signature(MasterFetchServer._smart_fetch_bulk)
         assert "schema" in sig.parameters
 
     def test_smart_fetch_accepts_schema_and_urls(self):
         """Verify smart_fetch signature has both urls and schema."""
         import inspect
-        from master_fetch.server import MasterFetchServer
+        from hound_mcp.server import MasterFetchServer
         sig = inspect.signature(MasterFetchServer.smart_fetch)
         assert "urls" in sig.parameters
         assert "schema" in sig.parameters
@@ -100,13 +100,13 @@ class TestFetchContentSchema:
 
     def test_smart_search_has_fetch_schema_param(self):
         import inspect
-        from master_fetch.server import MasterFetchServer
+        from hound_mcp.server import MasterFetchServer
         sig = inspect.signature(MasterFetchServer.smart_search)
         assert "fetch_content" in sig.parameters
         assert "fetch_schema" in sig.parameters
 
     def test_search_response_has_fetched_pages(self):
-        from master_fetch.search import SearchResponseModel
+        from hound_mcp.search import SearchResponseModel
         resp = SearchResponseModel(query="test", results=[])
         assert hasattr(resp, "fetched_pages")
         assert resp.fetched_pages == []
@@ -118,43 +118,43 @@ class TestSourceType:
     """Test _source_type domain classification."""
 
     def test_docs_domains(self):
-        from master_fetch.search import _source_type
+        from hound_mcp.search import _source_type
         assert _source_type("https://docs.python.org/3/tutorial") == "docs"
         assert _source_type("https://huggingface.co/models") == "docs"
         assert _source_type("https://kubernetes.io/docs/") == "docs"
 
     def test_paper_domains(self):
-        from master_fetch.search import _source_type
+        from hound_mcp.search import _source_type
         assert _source_type("https://arxiv.org/abs/2301.00001") == "paper"
         assert _source_type("https://nature.com/articles/xyz") == "paper"
 
     def test_repo_domains(self):
-        from master_fetch.search import _source_type
+        from hound_mcp.search import _source_type
         assert _source_type("https://github.com/user/repo") == "repo"
         assert _source_type("https://pypi.org/project/hound-mcp/") == "repo"
 
     def test_forum_domains(self):
-        from master_fetch.search import _source_type
+        from hound_mcp.search import _source_type
         assert _source_type("https://stackoverflow.com/questions/123") == "forum"
         assert _source_type("https://zhihu.com/question/456") == "forum"
 
     def test_news_domains(self):
-        from master_fetch.search import _source_type
+        from hound_mcp.search import _source_type
         assert _source_type("https://bbc.com/news/article") == "news"
         assert _source_type("https://36kr.com/p/123") == "news"
 
     def test_blog_domains(self):
-        from master_fetch.search import _source_type
+        from hound_mcp.search import _source_type
         assert _source_type("https://medium.com/@user/post") == "blog"
         assert _source_type("https://csdn.net/article/123") == "blog"
 
     def test_path_heuristic(self):
-        from master_fetch.search import _source_type
+        from hound_mcp.search import _source_type
         assert _source_type("https://example.com/docs/api") == "docs"
         assert _source_type("https://example.com/blog/post-1") == "blog"
 
     def test_unknown_returns_other(self):
-        from master_fetch.search import _source_type
+        from hound_mcp.search import _source_type
         assert _source_type("https://randomsite12345.com/page") == "other"
 
 
@@ -164,11 +164,11 @@ class TestDdgAlias:
     """Test that 'ddg' is accepted as engine name."""
 
     def test_ddg_in_validate_engines(self):
-        from master_fetch.search import _validate_engines
+        from hound_mcp.search import _validate_engines
         # Should not raise
         result = _validate_engines(["ddg"])
         assert result == ["ddg"]
 
     def test_ddg_maps_to_duckduckgo(self):
-        from master_fetch.search_metasearch import _HOUND_TO_BACKEND
+        from hound_mcp.search_metasearch import _HOUND_TO_BACKEND
         assert _HOUND_TO_BACKEND["ddg"] == "duckduckgo"

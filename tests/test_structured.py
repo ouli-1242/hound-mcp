@@ -2,7 +2,7 @@
 
 import pytest
 
-from master_fetch.structured import extract_structured
+from hound_mcp.structured import extract_structured
 
 
 SAMPLE_HTML = """

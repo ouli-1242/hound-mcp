@@ -9,7 +9,7 @@ token in copy/links/scripts) must not classify as paywall; real paywalls
 
 import pytest
 from datetime import datetime, timedelta, timezone
-from master_fetch.envelope import (
+from hound_mcp.envelope import (
     detect_page_type, classify_source, compute_freshness, page_type_from_error,
     _paywall_evidence, _parse_date, _count_content_links,
 )

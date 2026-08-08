@@ -2,7 +2,7 @@
 
 import pytest
 
-from master_fetch.server import MasterFetchServer
+from hound_mcp.server import MasterFetchServer
 
 
 class FakeResp:
@@ -31,7 +31,7 @@ class FakeSession:
 @pytest.mark.asyncio
 async def test_resolve_url_returns_final_url(monkeypatch):
     server = MasterFetchServer()
-    monkeypatch.setattr("master_fetch.fetcher.HTTPSession", FakeSession)
+    monkeypatch.setattr("hound_mcp.fetcher.HTTPSession", FakeSession)
     result = await server.resolve_url("https://t.co/abc123")
     assert result["final_url"] == "https://final.example/x"
     assert result["status"] == 200
@@ -43,7 +43,7 @@ async def test_resolve_url_returns_final_url(monkeypatch):
 @pytest.mark.asyncio
 async def test_resolve_url_surfaces_error(monkeypatch):
     server = MasterFetchServer()
-    monkeypatch.setattr("master_fetch.fetcher.HTTPSession", FakeSession)
+    monkeypatch.setattr("hound_mcp.fetcher.HTTPSession", FakeSession)
     result = await server.resolve_url("https://example.com/blocked")
     assert result["error"]
     assert result["final_url"] == ""

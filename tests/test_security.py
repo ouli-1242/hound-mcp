@@ -8,7 +8,7 @@ input; we assert the correct outcome for every vector.
 """
 
 import pytest
-from master_fetch.security import (
+from hound_mcp.security import (
     validate_url, validate_css_selector, validate_headers, validate_proxy,
     validate_timeout, validate_search_query, redact_api_key, SecurityError,
     _normalize_ip_notation,

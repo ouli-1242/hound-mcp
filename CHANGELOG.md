@@ -330,9 +330,9 @@ Three reliability fixes that make hound brick-proof across major version upgrade
 
 **1. Self-healing CLI entry point (cli.py)**
 
-New `master_fetch/cli.py` module replaces `master_fetch.server:main` as the pip
+New `hound_mcp/cli.py` module replaces `hound_mcp.server:main` as the pip
 entry point. It is deliberately lightweight (stdlib only, no heavy imports at
-module level). When `hound` runs, it tries `from master_fetch.server import
+module level). When `hound` runs, it tries `from hound_mcp.server import
 main` inside a try/except. If the import fails (missing dep, corrupted
 install, half-failed update), it:
 - Detects the ImportError
@@ -392,7 +392,7 @@ the core dep tree didn't change between minor versions.
 v11.0.0 added `markdownify` as a new core dep. The `--no-deps` flag meant
 pip skipped it. The old v10.4.1 install didn't have markdownify (it came
 via scrapling's transitive tree). After `--no-deps` update, `import
-master_fetch` crashed on `import markdownify` with `ModuleNotFoundError`.
+hound_mcp` crashed on `import markdownify` with `ModuleNotFoundError`.
 
 **Fix**: Drop `--no-deps` from the primary update pass. `pip install
 hound-mcp==TARGET` (no `--no-deps`, no `[all]`) installs hound-mcp + any
@@ -683,7 +683,7 @@ itself was dead so the tool could not self-heal. Two root causes:
 
 1. `hound -u` ran `pip install --upgrade hound-mcp[all]`. The `[all]` extra pulls
    `onnxruntime` (~100 MB), `tokenizers`, `rapidocr`, `pdfplumber` - slow and
-   fragile. When it failed mid-install, pip had already deleted `master_fetch`
+   fragile. When it failed mid-install, pip had already deleted `hound_mcp`
    but could not replace `hound.exe` (Windows locks a running .exe), so every
    `hound` command crashed with `ModuleNotFoundError`, including `hound -u`.
 2. The recovery messages told users to run a bare `pip install --force-reinstall`
@@ -697,7 +697,7 @@ preserved. Fast, deterministic, cannot fail on a heavy dep.
 
 **Windows: a detached helper runs pip after the launcher exits.** The running
 `hound -u` command IS `hound.exe`, which Windows locks against overwrite. The
-helper is a standalone `python -c` (no `master_fetch` dependency, so it survives
+helper is a standalone `python -c` (no `hound_mcp` dependency, so it survives
 the package being replaced) that waits for the parent launcher to exit, frees
 the launcher via the **rename trick** (Windows permits renaming a running .exe,
 just not overwriting it), then runs pip with the launcher free. A still-running
@@ -896,7 +896,7 @@ live vs archive cache entries).
   editable); `pytest` silently ran the stale installed copy and `src/` edits
   went untested (bit the project 4+ times). Added `pythonpath = ["src"]` to
   `[tool.pytest.ini_options]` so pytest always imports from src. Pinned with a
-  test asserting `master_fetch.__file__` is under `src/`.
+  test asserting `hound_mcp.__file__` is under `src/`.
 - New modules `envelope.py` (page-type/freshness/authority) and `archive.py`
   (Wayback fallback) are dependency-free (stdlib only) and fully type-annotated.
 - `archive.py` imports httpx lazily (only on a fallback) so it adds zero
@@ -1022,10 +1022,10 @@ tools, no schema breaks, no response-shape breaks.
   `asyncio.to_thread()` before their async prewarm function runs. Slow optional
   imports (reranker/ONNX chain, future prewarms) cannot block the event loop and
   mute the MCP `initialize` response.
-- `master_fetch.search_engines` now lazy-loads `search_metasearch` only inside
-  `multi_search()`. Importing `master_fetch.search` for cache hits, validation
+- `hound_mcp.search_engines` now lazy-loads `search_metasearch` only inside
+  `multi_search()`. Importing `hound_mcp.search` for cache hits, validation
   errors, or model construction no longer imports primp/httpx/lxml/fake_useragent.
-- `master_fetch.search` now lazy-loads `master_fetch.reranker`; cached searches
+- `hound_mcp.search` now lazy-loads `hound_mcp.reranker`; cached searches
   and invalid search requests no longer import the reranker wrapper or touch any
   ONNX/tokenizer path.
 - Removed the broad `RuntimeWarning: coroutine was never awaited` suppression.
@@ -1036,7 +1036,7 @@ tools, no schema breaks, no response-shape breaks.
 
 ### Tests
 
-- Added regression coverage proving `master_fetch.search` does not eagerly load
+- Added regression coverage proving `hound_mcp.search` does not eagerly load
   live-search/reranker backends.
 - Added regression coverage proving slow optional prewarm imports do not starve
   the event loop.
@@ -1067,7 +1067,7 @@ transitively with `mcp`.
 
 - `tests/test_v91_http.py`: a full streamable HTTP lifecycle (initialize ->
   notifications/initialized -> tools/list -> tools/call -> clean shutdown)
-  against a `python -m master_fetch.server --http` subprocess, plus a clean-
+  against a `python -m hound_mcp.server --http` subprocess, plus a clean-
   teardown assertion. CI-safe (network-free, calls `cache_clear`). 626 tests
   total (was 624).
 
@@ -1106,13 +1106,13 @@ catch these (they fire in `__del__` post-loop, beyond any try/except).
   (`asyncio.sleep`) so pending `connection_lost` callbacks drain while the loop
   is alive, then explicitly closes any lingering asyncio subprocess transports
   on the loop (`loop._subprocess_transports`) so their `__del__` is a no-op.
-- Net result: `python -m master_fetch` exits 0 with an empty stderr on both a
+- Net result: `python -m hound_mcp` exits 0 with an empty stderr on both a
   quick disconnect (browser mid-launch) and a long-lived session. Verified with
   a new CI-safe lifecycle test (`tests/test_v9_lifecycle.py`).
 
 ### Added: CI-safe MCP lifecycle test
 
-`tests/test_v9_lifecycle.py` spawns `python -m master_fetch` as a stdio MCP
+`tests/test_v9_lifecycle.py` spawns `python -m hound_mcp` as a stdio MCP
 server and runs a full `initialize` -> `notifications/initialized` ->
 `tools/list` -> `tools/call` (cache_clear) -> clean-disconnect cycle in ~3s,
 asserting: the handshake responds, the connect-time `instructions` ship, all 6
@@ -1187,7 +1187,7 @@ the search loaded the model itself while the prewarm redundantly loaded it too
 
 The recurring 'hound failed to load' ~50% of the time was caused by heavy
 MODULE-LEVEL imports blocking the process for ~5s BEFORE the MCP initialize
-handshake could respond. On a cold start `import master_fetch.server` took
+handshake could respond. On a cold start `import hound_mcp.server` took
 **5.45s** (trafilatura 0.87s + the metasearch engine chain 0.86s +
 mcp.server.fastmcp 1.03s + mcp.types 1.03s, all eager)  -  cold starts exceeded
 the MCP client's initialize timeout, the client killed hound, and the messy
@@ -1197,7 +1197,7 @@ prewarm itself was async + caught, but the synchronous 5s import was the killer.
 - **Heavy imports deferred to first use**: trafilatura, the search_metasearch
   engine chain (primp/httpx/lxml/h2/fake_useragent), mcp.server.fastmcp, and
   mcp.types are now lazy-imported at their call sites, NOT at module load.
-  `import master_fetch.server` dropped from **5.45s to 0.52s** (10x). The MCP
+  `import hound_mcp.server` dropped from **5.45s to 0.52s** (10x). The MCP
   handshake now responds in ~0.5-1s instead of 5s+. The heavy deps load on the
   first search/screenshot/fetch that actually needs them, never blocking
   startup. (mcp.server.Server + mcp.types are still imported in serve() before
@@ -1218,7 +1218,7 @@ prewarm itself was async + caught, but the synchronous 5s import was the killer.
   search/reranker prewarm tasks too.
 
 - 619 tests (613 + 6 new v8.2 startup tests in test_v8_2_startup.py: assert the
-  heavy deps are NOT in sys.modules after `import master_fetch.server`, assert
+  heavy deps are NOT in sys.modules after `import hound_mcp.server`, assert
   import < 2s, assert `_safe_prewarm` swallows Exception + BaseException +
   caps hung launches). Live-proven: 11/11 stdio initialize probes succeeded
   (steady-state ~2.5s, was 5.45s cold).
@@ -1930,7 +1930,7 @@ The agent-effectiveness release. Hound now masters itself the moment it connects
 ### Fixed
 - **`hound -u` self-update hardened cross-platform with a bulletproof fallback.** The 3.6.2 fix (rename the running `hound.exe` aside so pip can replace it) is now wrapped in a two-layer updater that guarantees no user ever hits `WinError 32`:
   - **Layer 1  -  launcher staging (Windows):** `_stage_running_launcher()` renames `hound.exe` → `hound.exe.old` before pip runs (Windows allows renaming a running .exe even though it forbids overwriting it). pip then writes a fresh `hound.exe`. The `.old` is swept on the next launch by `_cleanup_old_launcher()`.
-  - **Layer 2  -  detached fallback (Windows):** if staging fails (read-only install, unusual layout) AND pip still hits the file lock, `_spawn_detached_updater()` spawns a background child that waits for the current process to exit (releasing the lock) and then runs pip, logging the outcome to `~/.master_fetch_cache/hound_updater.log`.
+  - **Layer 2  -  detached fallback (Windows):** if staging fails (read-only install, unusual layout) AND pip still hits the file lock, `_spawn_detached_updater()` spawns a background child that waits for the current process to exit (releasing the lock) and then runs pip, logging the outcome to `~/.hound_mcp_cache/hound_updater.log`.
   - **macOS/Linux:** no file lock exists, so staging is skipped entirely and pip runs synchronously. None of the Windows `.exe` logic is touched on POSIX.
 - **Every pip failure now prints the manual recovery command** (`python -m pip install --upgrade hound-mcp[all]`), so a user is never left without a path forward.
 - **Detached-updater generated script bug:** the child one-liner double-braced the `{r.returncode}` placeholder, which would have emitted a literal string instead of the pip result. Fixed and covered by a compile-check test so it can't regress silently.
@@ -2173,7 +2173,7 @@ The agent-effectiveness release. Hound now masters itself the moment it connects
 - OpenCode MCP config format: `type: "local"`, `command: ["hound"]`, `environment: { ... }` (not `env`).
 
 ### Added
-- `__main__.py`: `python -m master_fetch` works as MCP server
+- `__main__.py`: `python -m hound_mcp` works as MCP server
 - `__version__` in `__init__.py` as single source of truth
 - `list_sessions` in README tools table
 
@@ -2255,7 +2255,7 @@ The agent-effectiveness release. Hound now masters itself the moment it connects
 ## [2.0.0] - 2026-06-02: Hound
 
 Renamed product from "Master Fetch" to **Hound**: web research for AI agents.
-Internal module name stays `master_fetch`. Package: `hound-mcp`. CLI: `hound`.
+Internal module name stays `hound_mcp`. Package: `hound-mcp`. CLI: `hound`.
 
 ### Added
 
@@ -2263,11 +2263,11 @@ Internal module name stays `master_fetch`. Package: `hound-mcp`. CLI: `hound`.
 - Web search via TinyFish API: `smart_search` tool returns structured results (title, url, snippet)
   - Free (30 searches/min), no API key needed
   - Results cached for 5 minutes via SQLite
-  - Optional install: `pip install master-fetch[all]`
+  - Optional install: `pip install hound-mcp[all]`
   - Fetch-only users stay lean with zero extra dependencies
 
 ### Changed
-- Package architecture: `master-fetch` = fetch only, `master-fetch[all]` = fetch + search
+- Package architecture: `hound-mcp` = fetch only, `hound-mcp[all]` = fetch + search
 - README rewritten with competitor comparison tables and one-prompt install guides
 
 ## [1.1.0] - 2026-06-02

@@ -19,7 +19,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-logger = logging.getLogger("master_fetch.feed")
+logger = logging.getLogger("hound_mcp.feed")
 
 _MAX_FEED_BYTES = 2 * 1024 * 1024  # 2MB cap — feeds are small text; larger is junk
 
@@ -125,7 +125,7 @@ async def fetch_feed(url: str, timeout: int = 20, max_items: int = 20) -> FeedRe
     field carries the reason and items is empty.
     """
     try:
-        from master_fetch.fetcher import HTTPSession
+        from hound_mcp.fetcher import HTTPSession
         async with HTTPSession(stealthy_headers=False, retries=1, timeout=timeout) as session:
             resp = await session.get(url, follow_redirects="safe")
         body = getattr(resp, "body", b"") or b""

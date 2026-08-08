@@ -9,7 +9,7 @@ import asyncio
 import time
 import pytest
 from pathlib import Path
-from master_fetch.cache import (
+from hound_mcp.cache import (
     get_cached, set_cached, clear_cache, clear_all_cache,
     _cache_key, DEFAULT_TTL, MAX_CACHE_ENTRIES,
 )
@@ -163,7 +163,7 @@ class TestCacheEviction:
     @pytest.mark.asyncio
     async def test_eviction_when_over_cap(self, cache_dir, monkeypatch):
         # Lower the cap for testing
-        monkeypatch.setattr("master_fetch.cache.MAX_CACHE_ENTRIES", 20)
+        monkeypatch.setattr("hound_mcp.cache.MAX_CACHE_ENTRIES", 20)
         # Insert 25 entries
         for i in range(25):
             await set_cached(f"https://example.com/{i}", "markdown", [f"content-{i}"],

@@ -64,7 +64,7 @@ def _get_search_proxy() -> str | None:
     ``search_engines.py`` lazy imports see the current proxy.
     """
     global _PROXY, _proxy_pool
-    from master_fetch.search_proxy import get_proxy_pool, _kick_health_check
+    from hound_mcp.search_proxy import get_proxy_pool, _kick_health_check
     pool = get_proxy_pool()
     if pool is None:
         _PROXY = None
@@ -936,7 +936,7 @@ async def metasearch(
     # (not just empty), the proxy is bad - cool it. If any engine succeeded,
     # the proxy is healthy - mark success. Only track when a proxy was used.
     if _search_proxy:
-        from master_fetch.search_proxy import get_proxy_pool
+        from hound_mcp.search_proxy import get_proxy_pool
         pool = get_proxy_pool()
         if pool is not None:
             has_connection_errors = any(

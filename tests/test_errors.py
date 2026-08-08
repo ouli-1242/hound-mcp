@@ -2,7 +2,7 @@
 
 import pytest
 
-from master_fetch.errors import classify_network_error, get_hint
+from hound_mcp.errors import classify_network_error, get_hint
 
 
 # ─── classify_network_error: category detection ──────────────────────────────
@@ -106,7 +106,7 @@ class TestAgentHintsNetworkErrors:
 
     def _make_result(self, status=0, error="", content=None):
         """Create a minimal ResponseModel for testing _agent_hints."""
-        from master_fetch.server import ResponseModel
+        from hound_mcp.server import ResponseModel
         return ResponseModel(
             url="https://example.com",
             status=status,
@@ -116,7 +116,7 @@ class TestAgentHintsNetworkErrors:
         )
 
     def test_connection_refused_next_action(self):
-        from master_fetch.server import _agent_hints
+        from hound_mcp.server import _agent_hints
         result = self._make_result(
             status=0,
             error="network_error: net::ERR_CONNECTION_REFUSED",
@@ -127,7 +127,7 @@ class TestAgentHintsNetworkErrors:
         assert "retry" in next_action.lower() or "switch" in next_action.lower() or "do not" in next_action.lower()
 
     def test_timeout_next_action(self):
-        from master_fetch.server import _agent_hints
+        from hound_mcp.server import _agent_hints
         result = self._make_result(
             status=0,
             error="network_error: TimeoutError: request timed out",
@@ -136,7 +136,7 @@ class TestAgentHintsNetworkErrors:
         assert "timeout" in next_action.lower() or "timed out" in next_action.lower()
 
     def test_all_tiers_failed_connection_refused(self):
-        from master_fetch.server import _agent_hints
+        from hound_mcp.server import _agent_hints
         result = self._make_result(
             status=0,
             error="all_tiers_failed: connection_refused (HTTP status 0)",
@@ -147,7 +147,7 @@ class TestAgentHintsNetworkErrors:
         assert "do not retry" in next_action.lower() or "switch" in next_action.lower()
 
     def test_all_tiers_failed_timeout(self):
-        from master_fetch.server import _agent_hints
+        from hound_mcp.server import _agent_hints
         result = self._make_result(
             status=0,
             error="all_tiers_failed: timeout (HTTP status 0)",
@@ -157,7 +157,7 @@ class TestAgentHintsNetworkErrors:
         assert "timeout" in next_action.lower()
 
     def test_generic_http_error_still_gets_hint(self):
-        from master_fetch.server import _agent_hints
+        from hound_mcp.server import _agent_hints
         result = self._make_result(
             status=500,
             error="http_error_500: server returned error status",
@@ -173,7 +173,7 @@ class TestSearchLowDiversityWarning:
     """Test that search next_action warns when most engines are blocked."""
 
     def test_high_block_ratio_warns(self):
-        from master_fetch.search import _search_next_action, SearchResult
+        from hound_mcp.search import _search_next_action, SearchResult
         results = [SearchResult(
             title="Test", url="https://example.com", snippet="test",
             source="yandex", position=1, relevance_score=0.8,
@@ -186,7 +186,7 @@ class TestSearchLowDiversityWarning:
         assert "HOUND_SEARCH_PROXY" in next_action
 
     def test_low_block_ratio_no_warning(self):
-        from master_fetch.search import _search_next_action, SearchResult
+        from hound_mcp.search import _search_next_action, SearchResult
         results = [SearchResult(
             title="Test", url="https://example.com", snippet="test",
             source="yandex", position=1, relevance_score=0.8,
@@ -199,7 +199,7 @@ class TestSearchLowDiversityWarning:
         assert "Some engines" in next_action
 
     def test_no_blocked_no_warning(self):
-        from master_fetch.search import _search_next_action, SearchResult
+        from hound_mcp.search import _search_next_action, SearchResult
         results = [SearchResult(
             title="Test", url="https://example.com", snippet="test",
             source="yandex", position=1, relevance_score=0.8,
@@ -217,7 +217,7 @@ class TestCrawlNetworkDiagnostics:
 
     def test_all_pages_network_failure(self):
         """When all pages fail with network errors, next_action should not be empty."""
-        from master_fetch.crawl import CrawlPage, CrawlResponseModel
+        from hound_mcp.crawl import CrawlPage, CrawlResponseModel
         # Simulate what smart_crawl does at the end
         pages = [
             CrawlPage(url="https://example.com/1", depth=0, status=-1,
@@ -231,7 +231,7 @@ class TestCrawlNetworkDiagnostics:
         assert network_failures == 2
         assert network_failures >= len(pages) * 0.5
 
-        from master_fetch.errors import classify_network_error
+        from hound_mcp.errors import classify_network_error
         sample_errors = [p.error for p in pages if p.error][:3]
         category, hint = classify_network_error(" ".join(sample_errors))
         assert category == "connection_refused"
@@ -239,7 +239,7 @@ class TestCrawlNetworkDiagnostics:
 
     def test_mixed_results_no_network_diagnostic(self):
         """When most pages succeed, no network diagnostic is added."""
-        from master_fetch.crawl import CrawlPage
+        from hound_mcp.crawl import CrawlPage
         pages = [
             CrawlPage(url="https://example.com/1", depth=0, status=200,
                      content_ok=True, content=["real content here"]),

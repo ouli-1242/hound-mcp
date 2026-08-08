@@ -19,7 +19,7 @@ import logging
 import os
 from typing import Optional
 
-logger = logging.getLogger("master_fetch.parse")
+logger = logging.getLogger("hound_mcp.parse")
 
 # Supported extensions
 SUPPORTED_EXTENSIONS = {".html", ".htm", ".xhtml", ".docx", ".xlsx", ".csv", ".pdf"}
@@ -91,7 +91,7 @@ def _parse_html(file_path: str) -> str:
     """Parse HTML file using trafilatura + markdownify (existing chain)."""
     with open(file_path, "r", encoding="utf-8", errors="replace") as f:
         html = f.read()
-    from master_fetch.trafilatura_extractor import extract_content_from_html
+    from hound_mcp.trafilatura_extractor import extract_content_from_html
     result = extract_content_from_html(html, file_path, "markdown")
     if result:
         return result

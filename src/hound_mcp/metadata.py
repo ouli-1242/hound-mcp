@@ -17,7 +17,7 @@ import re
 from typing import Any
 from urllib.parse import urljoin
 
-logger = logging.getLogger("master-fetch.metadata")
+logger = logging.getLogger("hound-mcp.metadata")
 
 # Match <meta property/name="KEY" content="VAL"> in either attribute order.
 _META_RE = re.compile(

@@ -4,7 +4,7 @@ Runs an ONNX cross-encoder (Apache-2.0 `cross-encoder/ms-marco-MiniLM-L-6-v2`,
 22.7M params, trained on MS MARCO passage reranking = query/document relevance)
 on the `onnxruntime` we ALREADY ship for OCR. No new runtime. The model + tokenizer
 are downloaded ONCE on first neural search into
-`~/.master_fetch_cache/models/msmarco-minilm-l6-v2/` (pinned to a specific HF
+`~/.hound_mcp_cache/models/msmarco-minilm-l6-v2/` (pinned to a specific HF
 revision + hash-checked), NOT bundled in the wheel, so the lean install stays small.
 
 Graceful fallback: if onnxruntime/tokenizers are missing (lean install) or the
@@ -25,7 +25,7 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-logger = logging.getLogger("master-fetch.reranker")
+logger = logging.getLogger("hound-mcp.reranker")
 
 MODEL_ID = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 # Pinned revision for reproducibility (downloaded files never shift under us).
@@ -36,7 +36,7 @@ MODEL_FILES = {
     "tokenizer.json": f"{_BASE}/tokenizer.json",
     "vocab.txt": f"{_BASE}/vocab.txt",
 }
-MODEL_DIR = Path.home() / ".master_fetch_cache" / "models" / "msmarco-minilm-l6-v2"
+MODEL_DIR = Path.home() / ".hound_mcp_cache" / "models" / "msmarco-minilm-l6-v2"
 MAX_SEQ = 512
 # Sanity floor so a truncated/failed download is rejected (real onnx is ~80MB).
 MIN_MODEL_BYTES = 50_000_000

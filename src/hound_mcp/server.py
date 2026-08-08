@@ -47,7 +47,7 @@ _warnings.filterwarnings("ignore", message="unclosed .*transport", category=Reso
 # __del__ during GC — after the loop is gone, so they can't be caught. Override
 # the hook to swallow ONLY that benign asyncio-transport teardown noise; every
 # other unraisable exception still goes to the original hook (real bugs stay
-# visible). This is what keeps `python -m master_fetch` stderr clean on exit.
+# visible). This is what keeps `python -m hound_mcp` stderr clean on exit.
 _ORIG_UNRAISABLEHOOK = getattr(sys, "unraisablehook", None)
 
 def _quiet_asyncio_del_hook(args):
@@ -77,11 +77,11 @@ try:
 except Exception:
     pass
 
-logger = logging.getLogger("master-fetch.server")
+logger = logging.getLogger("hound-mcp.server")
 
 
 
-from master_fetch import __version__
+from hound_mcp import __version__
 from pydantic import BaseModel, Field
 
 # Lazy imports: browser deps (patchright) pull in playwright (~5s load). Defer
@@ -110,7 +110,7 @@ def _browser_deps_available() -> bool:
     gracefully if patchright isn't installed, and the error is caught
     by the tool handler.
     """
-    from master_fetch.browser import is_browser_available_cached, browser_import_error
+    from hound_mcp.browser import is_browser_available_cached, browser_import_error
     global _browser_import_error
     cached = is_browser_available_cached()
     if cached is True:
@@ -134,26 +134,26 @@ async def _fallback_http_get(
 ):
     """HTTP fetch via primp (TLS impersonation). Used as the HTTP tier.
 
-    Returns a Response object from master_fetch.fetcher.
+    Returns a Response object from hound_mcp.fetcher.
     """
-    from master_fetch.fetcher import http_get
+    from hound_mcp.fetcher import http_get
     return await http_get(
         url, proxy=proxy, headers=headers, cookies=cookies, timeout=timeout,
     )
 
 if TYPE_CHECKING:
-    from master_fetch.fetcher import Response as _HoundResponse
-    from master_fetch.browser import StealthyBrowser
-    from master_fetch.search import SearchResponseModel
+    from hound_mcp.fetcher import Response as _HoundResponse
+    from hound_mcp.browser import StealthyBrowser
+    from hound_mcp.search import SearchResponseModel
     from mcp.server.fastmcp import Image
     from mcp.types import ImageContent, TextContent
 
-from master_fetch.cache import get_cached, set_cached, clear_cache, clear_all_cache, DEFAULT_TTL
-from master_fetch.reddit import is_reddit_url, rewrite_to_old_reddit, parse_old_reddit_listing
-from master_fetch.envelope import (
+from hound_mcp.cache import get_cached, set_cached, clear_cache, clear_all_cache, DEFAULT_TTL
+from hound_mcp.reddit import is_reddit_url, rewrite_to_old_reddit, parse_old_reddit_listing
+from hound_mcp.envelope import (
     classify_source, compute_freshness, detect_page_type, page_type_from_error,
 )
-from master_fetch.security import (
+from hound_mcp.security import (
     validate_url,
     validate_css_selector,
     validate_headers,
@@ -649,7 +649,7 @@ def _agent_hints(result: ResponseModel) -> tuple[str, str, bool]:
     elif err.startswith("not_a_pdf") or err.startswith("pdf_open_failed") or err.startswith("pdf_extract_failed"):
         next_action = "PDF could not be parsed - see error field"
     elif "all_tiers_failed" in err:
-        from master_fetch.errors import classify_network_error
+        from hound_mcp.errors import classify_network_error
         raw_err = " ".join(result.content) if result.content else err
         category, _ = classify_network_error(raw_err)
         if category == "connection_refused":
@@ -669,7 +669,7 @@ def _agent_hints(result: ResponseModel) -> tuple[str, str, bool]:
             next_action = ("All fetch tiers failed. The site may use unbypassable protection "
                           "(DataDome/Akamai/Turnstile) or is unreachable - switch sources.")
     elif result.status == 0 or result.status >= 400:
-        from master_fetch.errors import classify_network_error
+        from hound_mcp.errors import classify_network_error
         _, hint = classify_network_error(err)
         next_action = hint
 
@@ -789,7 +789,7 @@ def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, o
     focus_q = _FOCUS.get()
     if focus_q and result.extracted_type in ("markdown", "text", "article", "structured"):
         try:
-            from master_fetch.focus import focus_content
+            from hound_mcp.focus import focus_content
             full_text = focus_content(full_text, focus_q)
         except Exception as e:
             logger.debug("focus filter failed: %s", e)
@@ -892,7 +892,7 @@ def _extract_pdf_response(body: bytes, raw_ct: str, total_size: int, url: str,
     password = _PDF_PASSWORD.get()
     include_media = _INCLUDE_MEDIA.get()
     try:
-        from master_fetch.pdf_extractor import extract_pdf, PdfResult
+        from hound_mcp.pdf_extractor import extract_pdf, PdfResult
         result: PdfResult = extract_pdf(body, extraction_type=extraction_type,
                                         pages=pages, password=password,
                                         include_media=include_media)
@@ -918,7 +918,7 @@ def _extract_pdf_response(body: bytes, raw_ct: str, total_size: int, url: str,
     # Scanned / image-only PDF: fall back to OCR if the OCR extras are installed.
     if result.scanned and not result.encrypted:
         try:
-            from master_fetch.ocr import ocr_pdf, ocr_available
+            from hound_mcp.ocr import ocr_pdf, ocr_available
             if ocr_available():
                 ocr_result = ocr_pdf(body, pages=pages, password=password)
                 if ocr_result.content and not ocr_result.error:
@@ -1025,7 +1025,7 @@ def _translate_response(
     is_image = raw_ct.startswith('image/') and bool(raw_body)
     if is_image and raw_body:
         try:
-            from master_fetch.ocr import ocr_image_bytes, ocr_available
+            from hound_mcp.ocr import ocr_image_bytes, ocr_available
             if ocr_available():
                 text = ocr_image_bytes(raw_body)
                 if text:
@@ -1070,7 +1070,7 @@ def _translate_response(
 
     def _hound_extract():
         """Extract content via hound's own extractor (trafilatura + markdownify)."""
-        from master_fetch.extractor import extract_content
+        from hound_mcp.extractor import extract_content
         return extract_content(
             page, extraction_type=extraction_type,
             css_selector=css_selector,
@@ -1078,7 +1078,7 @@ def _translate_response(
 
     def _trafilatura_extract():
         """Extract content via trafilatura."""
-        from master_fetch.trafilatura_extractor import extract_with_trafilatura
+        from hound_mcp.trafilatura_extractor import extract_with_trafilatura
         return extract_with_trafilatura(page, extraction_type=extraction_type, css_selector=css_selector)
 
     if is_old_reddit_listing and raw_body:
@@ -1115,13 +1115,13 @@ def _translate_response(
         try:
             _html = raw_body.decode(getattr(page, 'encoding', None) or 'utf-8', errors='replace')
             page_html = _html
-            from master_fetch.metadata import extract_metadata, extract_image_urls
+            from hound_mcp.metadata import extract_metadata, extract_image_urls
             page_metadata = extract_metadata(_html, page_url)
             if _INCLUDE_MEDIA.get():
                 page_media = extract_image_urls(_html, page_url)
             if _INCLUDE_LINKS.get():
                 try:
-                    from master_fetch.links import extract_links
+                    from hound_mcp.links import extract_links
                     page_links = extract_links(_html, page_url, page_metadata)
                 except Exception as e:
                     logger.debug("links extraction failed for %s: %s", page_url, e)
@@ -1384,7 +1384,7 @@ class MasterFetchServer:
             # result. After this, the cache-only reader returns instantly
             # without touching the event loop.
             def _check_and_import():
-                from master_fetch.browser import check_browser_available
+                from hound_mcp.browser import check_browser_available
                 return check_browser_available()
             if not await asyncio.to_thread(_check_and_import):
                 return  # HTTP-only mode, no browser to prewarm
@@ -1678,7 +1678,7 @@ class MasterFetchServer:
         validate_headers(extra_headers)
         validate_css_selector(wait_selector)
 
-        from master_fetch.browser import StealthyBrowser
+        from hound_mcp.browser import StealthyBrowser
         common_kwargs: Dict[str, Any] = dict(
             wait=wait, proxy=proxy, locale=locale, timeout=timeout, cookies=cookies,
             cdp_url=cdp_url, headless=headless,
@@ -1932,7 +1932,7 @@ class MasterFetchServer:
         normalized_auth = _normalize_credentials(auth)
         use_tf = use_trafilatura and extraction_type in ("markdown", "text", "article", "structured")
 
-        from master_fetch.fetcher import HTTPSession
+        from hound_mcp.fetcher import HTTPSession
         http_proxy = proxy if isinstance(proxy, str) else None
         async with HTTPSession(
             impersonate=impersonate or "chrome",
@@ -2165,7 +2165,7 @@ class MasterFetchServer:
             ]
             timed_responses = await gather(*timed_tasks, return_exceptions=True)
         else:
-            from master_fetch.browser import StealthyBrowser
+            from hound_mcp.browser import StealthyBrowser
             async with StealthyBrowser(
                 wait=wait, proxy=proxy, locale=locale, cdp_url=cdp_url,
                 timeout=timeout, cookies=cookies, headless=headless,
@@ -2301,7 +2301,7 @@ class MasterFetchServer:
         # results where schema has data but focus-filtered content is empty).
         if schema and isinstance(schema, dict) and (schema.get("properties") or schema.get("type") == "auto" or schema.get("mode") == "auto"):
             # Security: validate all CSS selectors in the schema before use
-            from master_fetch.security import validate_css_selector, SecurityError
+            from hound_mcp.security import validate_css_selector, SecurityError
             try:
                 for _fn, _fs in schema.get("properties", {}).items():
                     if isinstance(_fs, dict) and _fs.get("selector"):
@@ -2320,7 +2320,7 @@ class MasterFetchServer:
             )
             html_content = "\n".join(html_result.content) if html_result.content else ""
             if html_content and html_result.status < 400:
-                from master_fetch.structured import extract_structured
+                from hound_mcp.structured import extract_structured
                 structured = await asyncio_to_thread(
                     extract_structured, html_content, schema, url,
                     html_result.metadata or {},
@@ -2369,7 +2369,7 @@ class MasterFetchServer:
         if actions:
             if force_fetcher == "http":
                 raise ValueError("actions require the browser tier; use force_fetcher='stealthy' or omit it")
-            from master_fetch.actions import build_page_action
+            from hound_mcp.actions import build_page_action
             page_action = build_page_action(actions)  # validates; raises on bad input
             if page_action is None:
                 raise ValueError("actions must be a non-empty list of action dicts")
@@ -2586,10 +2586,10 @@ class MasterFetchServer:
         # TCP preflight: fail fast (2s) if the host is unreachable, saving
         # 30-60s of HTTP+Stealthy timeouts. Only for definitive failures
         # (connection_refused, dns_failure); timeout/unknown still try HTTP.
-        from master_fetch.fetcher import tcp_preflight
+        from hound_mcp.fetcher import tcp_preflight
         reachable, preflight_category = await asyncio_to_thread(tcp_preflight, url, 2.0)
         if not reachable and preflight_category in ("connection_refused", "dns_failure"):
-            from master_fetch.errors import get_hint
+            from hound_mcp.errors import get_hint
             elapsed = (now() - start_time) * 1000
             result = ResponseModel(
                 url=url, status=0, content=[""],
@@ -2703,7 +2703,7 @@ class MasterFetchServer:
         # All tiers failed
         errors.append(f"Stealthy failed (status {result.status})")
         # Classify the failure for agent-actionable tips
-        from master_fetch.errors import classify_network_error
+        from hound_mcp.errors import classify_network_error
         raw_error = result.error or " ".join(errors)
         category, _ = classify_network_error(raw_error)
         if category in ("connection_refused", "dns_failure"):
@@ -2784,7 +2784,7 @@ class MasterFetchServer:
         Returns installed version, latest PyPI version, and whether Hound is up to date.
         Call this to check if you should tell the user to run: hound -u
         """
-        from master_fetch import updater
+        from hound_mcp import updater
         installed, latest, is_current = await asyncio_to_thread(updater.check_version)
         # up_to_date: True if at or ahead of PyPI (no update needed)
         up_to_date = is_current if is_current is not None else True
@@ -2834,7 +2834,7 @@ class MasterFetchServer:
                     fetcher_used="parse",
                     error=f"Access denied: path is in a restricted system directory ({blocked})",
                 )
-        from master_fetch.parse import parse_file
+        from hound_mcp.parse import parse_file
         content, error = await asyncio_to_thread(parse_file, resolved)
         if error:
             return ResponseModel(
@@ -2865,7 +2865,7 @@ class MasterFetchServer:
         WHEN TO USE: following changelogs, docs updates, release notes, news
         sites, or any source with a feed URL. For a single page, use smart_fetch.
         """
-        from master_fetch.feed import fetch_feeds
+        from hound_mcp.feed import fetch_feeds
         urls = [u for u in urls if u and u.strip()]
         if not urls:
             raise ValueError("feed_fetch requires at least one URL")
@@ -2899,8 +2899,8 @@ class MasterFetchServer:
         WHEN TO USE: t.co/bit.ly short links, redirect-heavy search results,
         checking whether a link is alive (200) or dead (404/410) before fetching.
         """
-        from master_fetch.fetcher import HTTPSession
-        from master_fetch.security import validate_url, SecurityError
+        from hound_mcp.fetcher import HTTPSession
+        from hound_mcp.security import validate_url, SecurityError
         try:
             url = validate_url(url)
         except SecurityError as se:
@@ -2960,7 +2960,7 @@ class MasterFetchServer:
         location/language/region (geo), page (0-10), freshness
         (day|week|month|year). Results cached 5min.
         """
-        from master_fetch.search import SearchResponseModel  # lazy: search.py pulls the metasearch engine chain
+        from hound_mcp.search import SearchResponseModel  # lazy: search.py pulls the metasearch engine chain
         try:
             query = validate_search_query(query)
         except SecurityError as e:
@@ -2970,7 +2970,7 @@ class MasterFetchServer:
             )
 
         try:
-            from master_fetch.search import smart_search as _smart_search
+            from hound_mcp.search import smart_search as _smart_search
             result = await _smart_search(
                 self, query, max_results, cache_ttl,
                 mode=mode, engines=engines, url=url,
@@ -3006,7 +3006,7 @@ class MasterFetchServer:
                     })
                     # Implicit feedback: record domain as useful
                     if page_result.content_ok:
-                        from master_fetch.search import record_search_feedback
+                        from hound_mcp.search import record_search_feedback
                         record_search_feedback(sr.url)
                 except Exception:
                     pass  # silently skip failed fetches
@@ -3053,7 +3053,7 @@ class MasterFetchServer:
             # Lazy import to break circular dependency (crawl.py imports
             # ResponseModel from server.py; server.py imports smart_crawl
             # from crawl.py). Function-level import avoids import-time cycle.
-            from master_fetch.crawl import smart_crawl as _smart_crawl, CrawlResponseModel as _CRM
+            from hound_mcp.crawl import smart_crawl as _smart_crawl, CrawlResponseModel as _CRM
             return await _smart_crawl(
                 self, url, max_pages=max_pages, max_depth=max_depth,
                 path_include=path_include, path_exclude=path_exclude,
@@ -3065,7 +3065,7 @@ class MasterFetchServer:
                 deadline_ms=deadline_ms, sitemap=sitemap, search=search,
             )
         except Exception as e:
-            from master_fetch.crawl import CrawlResponseModel as _CRM
+            from hound_mcp.crawl import CrawlResponseModel as _CRM
             return _CRM(start_url=url, pages=[], error=redact_api_key(str(e)[:200]))
 
     # ─── Serve ─────────────────────────────────────────────────────
@@ -3248,7 +3248,7 @@ class MasterFetchServer:
                 # initialize handshake.
                 warm = asyncio.create_task(self._prewarm_stealthy())
                 warm_reranker = asyncio.create_task(
-                    _safe_imported_prewarm("master_fetch.reranker", "prewarm_reranker")
+                    _safe_imported_prewarm("hound_mcp.reranker", "prewarm_reranker")
                 )
                 try:
                     async with stdio_server() as (read, write):
@@ -3295,7 +3295,7 @@ class MasterFetchServer:
             async def lifespan(app):
                 warm = asyncio.create_task(self._prewarm_stealthy())
                 warm_reranker = asyncio.create_task(
-                    _safe_imported_prewarm("master_fetch.reranker", "prewarm_reranker")
+                    _safe_imported_prewarm("hound_mcp.reranker", "prewarm_reranker")
                 )
                 try:
                     async with manager.run():
@@ -3431,7 +3431,7 @@ class MasterFetchServer:
 
 def _help_epilog() -> str:
     """Styled epilog for `hound --help`: the command cheat-sheet + docs link."""
-    from master_fetch import cli_ui as ui
+    from hound_mcp import cli_ui as ui
     return "\n".join([
         ui.dim("commands:"),
         f"  {ui.cyan('hound')}              {ui.dim('serve · stdio MCP (Claude Code, Cursor, OpenCode, Pi)')}",
@@ -3445,8 +3445,8 @@ def _help_epilog() -> str:
 
 def main():
     """Entry point for the hound CLI."""
-    from master_fetch import cli_ui as ui
-    from master_fetch import updater
+    from hound_mcp import cli_ui as ui
+    from hound_mcp import updater
     import argparse
     parser = argparse.ArgumentParser(
         prog="hound",

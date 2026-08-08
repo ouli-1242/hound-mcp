@@ -136,7 +136,7 @@ playwright install chromium
 
 ```bash
 git clone https://github.com/ouli-1242/hound-mcp.git
-cd master-fetch
+cd hound-mcp
 
 # 开发模式（改代码立即生效，但移动目录会失效）
 pip install -e .[all]

@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Optional
 
-logger = logging.getLogger("master-fetch.actions")
+logger = logging.getLogger("hound-mcp.actions")
 
 MAX_ACTIONS = 20
 MAX_WAIT_MS = 30_000
@@ -40,7 +40,7 @@ _VALID_KEYS = {"click", "fill", "press", "wait", "scroll", "wait_selector"}
 
 def _validate_actions(actions) -> list[dict]:
     """Validate + normalize the actions list. Raises ValueError on bad input."""
-    from master_fetch.security import validate_css_selector
+    from hound_mcp.security import validate_css_selector
 
     if not isinstance(actions, list) or not actions:
         raise ValueError("actions must be a non-empty list of action dicts")

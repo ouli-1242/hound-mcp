@@ -19,7 +19,7 @@ import logging
 import re
 from urllib.parse import urlparse, urlunparse
 
-logger = logging.getLogger("master-fetch.reddit")
+logger = logging.getLogger("hound-mcp.reddit")
 
 # A "thing" block opens with class="... thing ...". Real old.reddit.com HTML
 # writes it as `class=" thing id-t3_..."` (LEADING SPACE), so the pattern allows

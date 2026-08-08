@@ -17,5 +17,5 @@
 
 # Vendored / generated code shouldn't skew the language bar.
 NOTICE.ddgs.txt linguist-vendored
-src/master_fetch/search_metasearch.py linguist-vendored=true
+src/hound_mcp/search_metasearch.py linguist-vendored=true
 docs/** linguist-generated=true

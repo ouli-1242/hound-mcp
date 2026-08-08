@@ -20,7 +20,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
 import pytest
 
-from master_fetch.search_proxy import (
+from hound_mcp.search_proxy import (
     ProxyPool, _validate_proxy, _read_config_file, _read_env_var,
     load_proxies, get_proxy_pool, get_next_proxy,
     MAX_PROXIES,
@@ -30,7 +30,7 @@ from master_fetch.search_proxy import (
 @pytest.fixture(autouse=True)
 def _reset_pool_singleton():
     """Reset the module-level proxy pool before and after each test."""
-    import master_fetch.search_proxy as _sp
+    import hound_mcp.search_proxy as _sp
     _sp._pool = None
     yield
     _sp._pool = None
@@ -172,7 +172,7 @@ class TestProxyDeadDetection:
                     return FakeResp()
                 raise ConnectionError("refused")
 
-        monkeypatch.setattr("master_fetch.fetcher.HTTPSession", FakeSession)
+        monkeypatch.setattr("hound_mcp.fetcher.HTTPSession", FakeSession)
 
         results = await pool.health_check()
         assert results["http://alive:80"] is True
@@ -225,7 +225,7 @@ class TestEnvVarParsing:
 
     def test_single_proxy_env_var(self, monkeypatch):
         monkeypatch.setenv("HOUND_SEARCH_PROXY", "http://1.2.3.4:8080")
-        monkeypatch.setattr("master_fetch.search_proxy._config_path",
+        monkeypatch.setattr("hound_mcp.search_proxy._config_path",
                              lambda: Path("/nonexistent_proxy_test"))
         assert _read_env_var() == ["http://1.2.3.4:8080"]
 
@@ -253,34 +253,34 @@ class TestProxyMerging:
     def test_env_and_config_merged_deduped(self, monkeypatch, tmp_path):
         config_file = tmp_path / "proxies.json"
         config_file.write_text(json.dumps({"proxies": ["http://p1:80", "http://p2:80"]}))
-        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
+        monkeypatch.setattr("hound_mcp.search_proxy._config_path", lambda: config_file)
         monkeypatch.setenv("HOUND_SEARCH_PROXY", "http://p1:80,http://p3:80")
         result = load_proxies()
         assert result == ["http://p1:80", "http://p3:80", "http://p2:80"]
 
     def test_env_only(self, monkeypatch, tmp_path):
         config_file = tmp_path / "proxies.json"
-        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
+        monkeypatch.setattr("hound_mcp.search_proxy._config_path", lambda: config_file)
         monkeypatch.setenv("HOUND_SEARCH_PROXY", "http://p1:80")
         assert load_proxies() == ["http://p1:80"]
 
     def test_config_only(self, monkeypatch, tmp_path):
         config_file = tmp_path / "proxies.json"
         config_file.write_text(json.dumps({"proxies": ["socks5://p1:1080"]}))
-        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
+        monkeypatch.setattr("hound_mcp.search_proxy._config_path", lambda: config_file)
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
         assert load_proxies() == ["socks5://p1:1080"]
 
     def test_none_configured(self, monkeypatch, tmp_path):
         config_file = tmp_path / "proxies.json"
-        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
+        monkeypatch.setattr("hound_mcp.search_proxy._config_path", lambda: config_file)
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
         assert load_proxies() == []
 
     def test_max_proxies_cap(self, monkeypatch, tmp_path):
         config_file = tmp_path / "proxies.json"
         config_file.write_text(json.dumps({"proxies": [f"http://p{i}:80" for i in range(MAX_PROXIES + 5)]}))
-        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
+        monkeypatch.setattr("hound_mcp.search_proxy._config_path", lambda: config_file)
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
         result = load_proxies()
         assert len(result) == MAX_PROXIES
@@ -291,7 +291,7 @@ class TestProxyMerging:
 class TestPoolSingleton:
 
     def test_get_proxy_pool_none_when_empty(self, monkeypatch, tmp_path):
-        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: tmp_path / "none.json")
+        monkeypatch.setattr("hound_mcp.search_proxy._config_path", lambda: tmp_path / "none.json")
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
         assert get_proxy_pool() is None
         assert get_next_proxy() is None
@@ -299,7 +299,7 @@ class TestPoolSingleton:
     def test_get_pool_caches_until_config_changes(self, monkeypatch, tmp_path):
         config_file = tmp_path / "proxies.json"
         config_file.write_text(json.dumps({"proxies": ["http://p1:80"]}))
-        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
+        monkeypatch.setattr("hound_mcp.search_proxy._config_path", lambda: config_file)
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
         pool1 = get_proxy_pool()
         pool2 = get_proxy_pool()
@@ -312,7 +312,7 @@ class TestPoolSingleton:
     def test_rotation_across_calls(self, monkeypatch, tmp_path):
         config_file = tmp_path / "proxies.json"
         config_file.write_text(json.dumps({"proxies": ["http://p1:80", "http://p2:80", "http://p3:80"]}))
-        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
+        monkeypatch.setattr("hound_mcp.search_proxy._config_path", lambda: config_file)
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
         assert get_next_proxy() == "http://p1:80"
         assert get_next_proxy() == "http://p2:80"
@@ -325,17 +325,17 @@ class TestPoolSingleton:
 class TestMetasearchProxyIntegration:
 
     def test_metasearch_uses_no_proxy_when_unconfigured(self, monkeypatch, tmp_path):
-        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: tmp_path / "none.json")
+        monkeypatch.setattr("hound_mcp.search_proxy._config_path", lambda: tmp_path / "none.json")
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
-        from master_fetch.search_metasearch import _get_search_proxy
+        from hound_mcp.search_metasearch import _get_search_proxy
         assert _get_search_proxy() is None
 
     def test_metasearch_rotates_proxy_per_call(self, monkeypatch, tmp_path):
         config_file = tmp_path / "proxies.json"
         config_file.write_text(json.dumps({"proxies": ["http://p1:80", "http://p2:80"]}))
-        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
+        monkeypatch.setattr("hound_mcp.search_proxy._config_path", lambda: config_file)
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
-        from master_fetch.search_metasearch import _get_search_proxy
+        from hound_mcp.search_metasearch import _get_search_proxy
         assert _get_search_proxy() == "http://p1:80"
         assert _get_search_proxy() == "http://p2:80"
         assert _get_search_proxy() == "http://p1:80"
@@ -343,9 +343,9 @@ class TestMetasearchProxyIntegration:
     def test_metasearch_sets_module_level_proxy(self, monkeypatch, tmp_path):
         config_file = tmp_path / "proxies.json"
         config_file.write_text(json.dumps({"proxies": ["http://p1:80"]}))
-        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
+        monkeypatch.setattr("hound_mcp.search_proxy._config_path", lambda: config_file)
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
-        import master_fetch.search_metasearch as sm
+        import hound_mcp.search_metasearch as sm
         sm._PROXY = "stale_value"
         proxy = sm._get_search_proxy()
         assert proxy == "http://p1:80"
@@ -354,11 +354,11 @@ class TestMetasearchProxyIntegration:
     def test_all_cooled_falls_back_to_direct(self, monkeypatch, tmp_path):
         config_file = tmp_path / "proxies.json"
         config_file.write_text(json.dumps({"proxies": ["http://p1:80"]}))
-        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
+        monkeypatch.setattr("hound_mcp.search_proxy._config_path", lambda: config_file)
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
         pool = get_proxy_pool()
         pool.mark_failed("http://p1:80")
-        from master_fetch.search_metasearch import _get_search_proxy
+        from hound_mcp.search_metasearch import _get_search_proxy
         assert _get_search_proxy() is None
 
 
@@ -371,20 +371,20 @@ class TestCrawlProxyIntegration:
         """fetch_one in crawl.py should call get_next_proxy and pass it to smart_fetch."""
         config_file = tmp_path / "proxies.json"
         config_file.write_text(json.dumps({"proxies": ["http://crawl-p1:80", "http://crawl-p2:80"]}))
-        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
+        monkeypatch.setattr("hound_mcp.search_proxy._config_path", lambda: config_file)
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
 
         received_proxies = []
 
         async def mock_smart_fetch(self, url=None, **kwargs):
-            from master_fetch.server import ResponseModel
+            from hound_mcp.server import ResponseModel
             received_proxies.append(kwargs.get("proxy"))
             return ResponseModel(
                 url=url or "", status=200, content=["<html>ok</html>"],
                 fetcher_used="http",
             )
 
-        from master_fetch.server import MasterFetchServer
+        from hound_mcp.server import MasterFetchServer
         monkeypatch.setattr(MasterFetchServer, "smart_fetch", mock_smart_fetch)
 
         server = MasterFetchServer()
@@ -398,20 +398,20 @@ class TestCrawlProxyIntegration:
 
     def test_crawl_no_proxies_passes_none(self, monkeypatch, tmp_path):
         """When no proxies configured, crawl passes None (direct connection)."""
-        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: tmp_path / "none.json")
+        monkeypatch.setattr("hound_mcp.search_proxy._config_path", lambda: tmp_path / "none.json")
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
 
         received_proxies = []
 
         async def mock_smart_fetch(self, url=None, **kwargs):
-            from master_fetch.server import ResponseModel
+            from hound_mcp.server import ResponseModel
             received_proxies.append(kwargs.get("proxy"))
             return ResponseModel(
                 url=url or "", status=200, content=["<html>ok</html>"],
                 fetcher_used="http",
             )
 
-        from master_fetch.server import MasterFetchServer
+        from hound_mcp.server import MasterFetchServer
         monkeypatch.setattr(MasterFetchServer, "smart_fetch", mock_smart_fetch)
 
         server = MasterFetchServer()
@@ -428,13 +428,13 @@ class TestCrawlProxyIntegration:
         config_file.write_text(json.dumps({"proxies": [
             "http://c1:80", "http://c2:80", "http://c3:80",
         ]}))
-        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
+        monkeypatch.setattr("hound_mcp.search_proxy._config_path", lambda: config_file)
         monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
 
         received_proxies = []
 
         async def mock_smart_fetch(self, url=None, **kwargs):
-            from master_fetch.server import ResponseModel
+            from hound_mcp.server import ResponseModel
             received_proxies.append(kwargs.get("proxy"))
             return ResponseModel(
                 url=url or "", status=200, content=[
@@ -443,7 +443,7 @@ class TestCrawlProxyIntegration:
                 fetcher_used="http",
             )
 
-        from master_fetch.server import MasterFetchServer
+        from hound_mcp.server import MasterFetchServer
         monkeypatch.setattr(MasterFetchServer, "smart_fetch", mock_smart_fetch)
 
         server = MasterFetchServer()

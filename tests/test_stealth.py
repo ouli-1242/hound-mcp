@@ -8,7 +8,7 @@ and getImageData, HeadlessChrome must not appear in the UA.
 """
 
 import pytest
-from master_fetch.browser import (
+from hound_mcp.browser import (
     DEFAULT_ARGS, HARMFUL_ARGS, STEALTH_ARGS,
     _FINGERPRINT_PROFILES, _generate_fingerprint_profile,
     _build_stealth_init_script,

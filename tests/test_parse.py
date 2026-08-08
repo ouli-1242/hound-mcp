@@ -5,7 +5,7 @@ import tempfile
 
 import pytest
 
-from master_fetch.parse import parse_file, SUPPORTED_EXTENSIONS, MAX_PARSE_FILE_SIZE
+from hound_mcp.parse import parse_file, SUPPORTED_EXTENSIONS, MAX_PARSE_FILE_SIZE
 
 
 class TestParseFileBasic:

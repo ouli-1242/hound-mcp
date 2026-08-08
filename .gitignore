@@ -30,7 +30,7 @@ Thumbs.db
 credentials.json
 
 # Project caches (runtime)
-.master_fetch_cache/
+.hound_mcp_cache/
 .hound_cache/
 *.log
 
@@ -55,7 +55,7 @@ scratch/
 .claude/
 .cursor/
 keys.md
-master-fetch-bug-report.md
+hound-mcp-bug-report.md
 
 # Local-only temp helper scripts (one-off fixes, release-note drafts).
 /.fix_*.py

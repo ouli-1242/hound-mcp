@@ -2,7 +2,7 @@
 
 import pytest
 
-from master_fetch.feed import (
+from hound_mcp.feed import (
     _parse_feed_xml, _parse_date, fetch_feed, fetch_feeds,
     FeedItem, FeedResult,
 )
@@ -95,7 +95,7 @@ class TestFetchFeed:
     async def test_fetch_feeds_batch(self, monkeypatch):
         async def fake_fetch(url, timeout=20, max_items=20):
             return FeedResult(source_url=url, source_title=url, items=[FeedItem(title="x")])
-        monkeypatch.setattr("master_fetch.feed.fetch_feed", fake_fetch)
+        monkeypatch.setattr("hound_mcp.feed.fetch_feed", fake_fetch)
         results = await fetch_feeds(["https://a.com/feed", "https://b.com/feed"])
         assert len(results) == 2
         assert all(r.source_title for r in results)
