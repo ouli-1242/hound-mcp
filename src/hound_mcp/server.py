@@ -257,7 +257,7 @@ HOUND_INSTRUCTIONS = (
     "from snippets, always smart_fetch the top results with focus=your question)\n"
     "- RSS/Atom changelog tracking: feed_fetch\n"
     "- local file to markdown: parse (not PDF - that goes through smart_fetch)\n"
-    "- screenshots for multimodal agents: mcp_screenshot (text agents: smart_fetch)\n"
+    "- screenshots for multimodal agents: screenshot (text agents: smart_fetch)\n"
     "- check a short link before fetching: resolve_url\n"
     "GOTCHAS: check response signals before trusting content - content_ok=false "
     "means JS shell/login wall (don't cite it); page_type='list' means fetch the "
@@ -344,14 +344,6 @@ class CacheInfoModel(BaseModel):
     """Response from cache management operations."""
     message: str = Field(description="Result message")
     purged: int = Field(default=0, description="Entries purged")
-
-
-class VersionInfoModel(BaseModel):
-    """Hound version and update status."""
-    version: str = Field(description="Installed version")
-    latest: str = Field(default="", description="Latest PyPI version")
-    up_to_date: bool = Field(default=True, description="Installed >= latest?")
-    update_command: str = Field(default="hound -u", description="Update command")
 
 
 @dataclass
@@ -2611,17 +2603,27 @@ class MasterFetchServer:
         # TCP preflight: fail fast (2s) if the host is unreachable, saving
         # 30-60s of HTTP+Stealthy timeouts. Only for definitive failures
         # (connection_refused, dns_failure); timeout/unknown still try HTTP.
-        from hound_mcp.fetcher import tcp_preflight
-        reachable, preflight_category = await asyncio_to_thread(tcp_preflight, url, 2.0)
-        if not reachable and preflight_category in ("connection_refused", "dns_failure"):
-            from hound_mcp.errors import get_hint
-            elapsed = (now() - start_time) * 1000
-            result = ResponseModel(
-                url=url, status=0, content=[""],
-                fetcher_used="none", error=f"network_error: {preflight_category} (TCP preflight)",
-                duration_ms=elapsed,
-            )
-            result.escalation_path = f"preflight:{preflight_category}(skipped_http+stealthy)"
+        # 代理感知：配置了代理（HTTP 请求走代理而非直连）时跳过 preflight——
+        # 直连探测会误报 connection_refused/dns_failure，跳过以避免误判。
+        _env_proxy = os.environ.get("HOUND_SEARCH_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("ALL_PROXY")
+        if not (proxy or _env_proxy):
+            from hound_mcp.fetcher import tcp_preflight
+            reachable, preflight_category = await asyncio_to_thread(tcp_preflight, url, 2.0)
+            if not reachable and preflight_category in ("connection_refused", "dns_failure"):
+                from hound_mcp.errors import get_hint
+                elapsed = (now() - start_time) * 1000
+                result = ResponseModel(
+                    url=url, status=0, content=[""],
+                    fetcher_used="none", error=f"network_error: {preflight_category} (TCP preflight)",
+                    duration_ms=elapsed,
+                )
+                result.escalation_path = f"preflight:{preflight_category}(skipped_http+stealthy)"
+            else:
+                result = None
+        else:
+            result = None
+
+        if result is not None:
             # Try archive.org before giving up
             if _should_try_archive(result):
                 archive_result = await self._fetch_from_archive(
@@ -2801,31 +2803,6 @@ class MasterFetchServer:
                 message=f"Cleared {count} expired cache entries.", purged=count,
             )
 
-    # ─── Version ──────────────────────────────────────────────────
-
-    async def version(self) -> VersionInfoModel:
-        """Check installed Hound version and whether an update is available.
-
-        Returns installed version, latest PyPI version, and whether Hound is up to date.
-        Call this to check if you should tell the user to run: hound -u
-        """
-        from hound_mcp import updater
-        installed, latest, is_current = await asyncio_to_thread(updater.check_version)
-        # up_to_date: True if at or ahead of PyPI (no update needed)
-        up_to_date = is_current if is_current is not None else True
-        if not up_to_date and latest:
-            try:
-                if updater.pad_version(installed) > updater.pad_version(latest):
-                    up_to_date = True
-            except (ValueError, IndexError):
-                pass
-        return VersionInfoModel(
-            version=installed,
-            latest=latest or "",
-            up_to_date=up_to_date,
-            update_command="hound -u",
-        )
-
     # ─── Parse (local file) ─────────────────────────────────────────
 
     async def parse(
@@ -2850,10 +2827,25 @@ class MasterFetchServer:
             _os.path.expanduser("~/.gnupg"),
             _os.path.expanduser("~/.aws"),
         )
+        # 敏感文件/目录黑名单（追加，覆盖常见凭据文件）
+        _BLOCKED_FILES = (
+            _os.path.expanduser("~/.env"),
+            _os.path.expanduser("~/.bash_history"),
+            _os.path.expanduser("~/.zsh_history"),
+            _os.path.expanduser("~/.git-credentials"),
+            _os.path.expanduser("~/.netrc"),
+        )
+        _blocked_prefixes = tuple(
+            b.lower().replace("/", "\\") if _os.name == "nt" else b
+            for b in _BLOCKED_DIRS
+        )
+        _blocked_file_prefixes = tuple(
+            b.lower().replace("/", "\\") if _os.name == "nt" else b
+            for b in _BLOCKED_FILES
+        )
         resolved_lower = resolved.lower().replace("/", "\\") if _os.name == "nt" else resolved
-        for blocked in _BLOCKED_DIRS:
-            blocked_norm = blocked.lower().replace("/", "\\") if _os.name == "nt" else blocked
-            if resolved_lower.startswith(blocked_norm):
+        for blocked in _blocked_prefixes + _blocked_file_prefixes:
+            if resolved_lower.startswith(blocked):
                 return ResponseModel(
                     url=f"file://{file_path}", status=0, content=[""],
                     fetcher_used="parse",
@@ -2891,11 +2883,17 @@ class MasterFetchServer:
         sites, or any source with a feed URL. For a single page, use smart_fetch.
         """
         from hound_mcp.feed import fetch_feeds
+        from hound_mcp.security import SecurityError, validate_url
         urls = [u for u in urls if u and u.strip()]
         if not urls:
             raise ValueError("feed_fetch requires at least one URL")
         if len(urls) > 50:
             raise ValueError("feed_fetch supports at most 50 URLs per call")
+        # SSRF 防护：与 resolve_url 一致，每个 feed URL 先经 validate_url 校验
+        try:
+            urls = [validate_url(u) for u in urls]
+        except SecurityError as se:
+            raise ValueError(f"feed_fetch URL 校验失败: {se}") from se
         results = await fetch_feeds(urls, timeout=timeout or 20, max_items=max_items if max_items is not None else 20)
         return [
             {
@@ -3100,8 +3098,8 @@ class MasterFetchServer:
     # Saves ~69% tokens vs FastMCP auto-generated schemas.
     _TOOL_DEFS: list[dict] = [
         {
-            "name": "mcp_smart_fetch",
-            "description": "Fetch any URL or PDF. Auto anti-bot (HTTP -> stealthy). \n\nPOWER FEATURES (save calls + tokens): \n- focus='query': extracts only BM25-relevant paragraphs. smart_fetch(url, focus='embedding dimension') on a 75-page paper returns only paragraphs about embeddings - one call instead of ten. Post-cache (no re-fetch). Re-pass same focus when paginating. \n- pages='9' or pages='1-5,9-12': specific PDF pages. PDFs return table_of_contents [{level,title,page,end_page}] - use page ranges to grab one section. \n- urls=['url1','url2']: parallel bulk fetch. Use when you have multiple URLs from search results - one call, not N sequential ones. \n\nDECISION GUIDE: Have a URL + a specific question? focus='your question'. Have a PDF + know which page? pages='9'. Have a PDF + don't know which page? focus='your question' (BM25 finds it). Content behind click/form/scroll? actions=[{click:'button'},{fill:{selector:'#q',text:'x'}}]. Need the page's source links? include_links=true -> response.links.citations. \n\nRESPONSE SIGNALS (check before trusting content): \n- content_ok: True = real content. False = JS shell, login wall, or error - don't trust the content. \n- next_action: follow it - tells you the optimal next call (paginate, switch source, follow links). Empty = done. \n- page_type: 'list' = page links to the real content (fetch those links or smart_crawl). 'auth_wall'/'paywall' = content behind login/payment (switch sources). \n- is_truncated + next_offset: more content available. Use offset=next_offset to continue, or re-fetch with focus= to get only relevant parts. \n- content_age_days + is_stale: for current-state questions, seek newer sources if stale. \n- quality_score: PDF extraction quality 0-1. Low = garbled/CID corruption. \n\ncss_selector narrows WHERE to extract (DOM element). focus narrows WHAT to extract (relevance to query). Use both for maximum precision. DataDome/Akamai/Turnstile unbypassable -> switch sources, don't retry same URL. cache_ttl=0 forces fresh.",
+            "name": "smart_fetch",
+            "description": "Fetch any URL or PDF. Auto anti-bot: HTTP first, escalates to stealthy browser when blocked. \n\nKEY FEATURES: \n- focus='query': extract only relevant paragraphs (BM25). Best for long pages - one call instead of many. \n- pages='9' or '1-5': fetch specific PDF pages (PDFs return a table_of_contents to pick ranges). \n- urls=['u1','u2']: parallel bulk fetch of multiple URLs in one call. \n- actions=[{click:'btn'},{fill:{selector,text}}]: interact with the page after load (load-more, forms, pagination). \n- schema={...}: structured extraction (CSS selectors) - returns JSON, no LLM needed. \n- css_selector: narrow extraction to one DOM element. extraction_type: markdown|html|text|article|structured. \n- include_links/include_media via options: get page links or up to 20 image URLs. \n\nRESPONSE SIGNALS (check before trusting): \n- content_ok=False -> JS shell / login wall / error, don't cite. Switch source. \n- next_action -> optimal next call (paginate, switch source, follow links). Empty = done. \n- page_type='list' -> fetch the linked pages or smart_crawl. 'auth_wall'/'paywall' -> switch sources. \n- is_truncated + next_offset -> more content available; re-fetch with offset=next_offset or focus=. \n- is_stale / content_age_days -> for current-state questions, seek newer sources. \n- quality_score (PDF) low -> garbled/CID corruption. \n\nAnti-bot: DataDome/Akamai/Turnstile unbypassable -> switch sources, don't retry. cache_ttl=0 forces fresh (default 1h).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3125,7 +3123,7 @@ class MasterFetchServer:
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
         },
         {
-            "name": "mcp_smart_crawl",
+            "name": "smart_crawl",
             "description": "Deep-crawl a site: best-first same-domain walk, each page as markdown + content_ok + page_type. List pages -> structured link list. \n\nWHEN TO USE: Multi-page docs, API references, or when you need many pages from one domain. For single pages, use smart_fetch instead. \n\nTWO-PHASE CRAWL (most efficient): sitemap=true (in options) maps all URLs from sitemap.xml in one fetch -> see the full URL list -> crawl_urls=[urls you need] to fetch only those pages. Avoids crawling irrelevant pages. sitemap='auto' = use sitemap if present else BFS. discover_only=true = URL map only (same as sitemap=true but no sitemap fetch). \n\nfocus='query' makes the crawl prioritize relevant pages AND focus-filters each page's content - use for large doc sites to save tokens. Caps: max_pages (10), max_depth (2), max_total_chars (token budget), deadline_ms. Reuses smart_fetch anti-bot + cache.",
             "inputSchema": {
                 "type": "object", "required": ["url"],
@@ -3141,7 +3139,7 @@ class MasterFetchServer:
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
         },
         {
-            "name": "mcp_screenshot",
+            "name": "screenshot",
             "description": "Screenshot a URL as an image. Multimodal agents only (content as images/canvas/visual layout). Text agents: use smart_fetch. Stealthy browser auto-managed.",
             "inputSchema": {
                 "type": "object", "required": ["url"],
@@ -3154,7 +3152,7 @@ class MasterFetchServer:
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
         },
         {
-            "name": "mcp_smart_search",
+            "name": "smart_search",
             "description": "Keyless web search (no API key, no account). 6 backends in parallel (duckduckgo,brave,yahoo,yandex,wikipedia,grokipedia; default pool: duckduckgo,brave,yahoo,yandex), neural-reranked + cross-backend consensus. Returns URLs + ranking, NOT content. \n\nWORKFLOW: Search -> smart_fetch the high-relevance results (fetch_relevance=high first). Use focus='your question' on each fetch to extract only relevant paragraphs and save tokens. Use urls=[...] to bulk-fetch multiple results in one call. \n\nANTI-PATTERN: Don't search for something you already have a URL for - use smart_fetch with focus= instead. NEVER answer from snippets alone - always fetch the page. \n\nFILTERS (in options): site='domain.com' restricts to one domain. exclude_sites=['pinterest.com'] removes noise. freshness='day|week|month|year' for time-sensitive queries (use 'week' or 'month' for recent info). page=0-10 for pagination. location/language/region for geo. \n\nRESULT FIELDS: relevance_score (0-1), fetch_relevance (high/med/low - fetch high first), engines_consensus (how many independent indexes returned this URL - higher = more authoritative). related_queries can suggest better search terms - try them if initial results miss the target.",
             "inputSchema": {
                 "type": "object", "required": ["query"],
@@ -3175,12 +3173,6 @@ class MasterFetchServer:
                 },
             },
             "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
-        },
-        {
-            "name": "version",
-            "description": "Hound version + update status.",
-            "inputSchema": {"type": "object", "properties": {}},
-            "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False},
         },
         {
             "name": "parse",
@@ -3354,7 +3346,7 @@ class MasterFetchServer:
 
         options = args.get("options") or {}
 
-        if name == "mcp_smart_fetch":
+        if name == "smart_fetch":
             url = args.get("url", "")
             urls = args.get("urls")
             if not url and not urls:
@@ -3389,7 +3381,7 @@ class MasterFetchServer:
             )
             return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
 
-        elif name == "mcp_smart_crawl":
+        elif name == "smart_crawl":
             kw = {k: v for k, v in options.items() if k in (
                 "max_pages", "max_depth", "path_include", "path_exclude",
                 "max_content_chars_per", "max_total_chars", "concurrency",
@@ -3403,14 +3395,14 @@ class MasterFetchServer:
             )
             return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
 
-        elif name == "mcp_screenshot":
+        elif name == "screenshot":
             kw = {k: v for k, v in options.items() if k in (
                 "full_page", "image_type", "quality", "wait", "wait_selector", "network_idle", "timeout",
             )}
             result = await self.screenshot(url=args["url"], session_id=args.get("session_id"), **kw)
             return result  # already list[ImageContent|TextContent]
 
-        elif name == "mcp_smart_search":
+        elif name == "smart_search":
             kw = {k: v for k, v in options.items() if k in (
                 "max_results", "cache_ttl", "mode", "engines", "url",
                 "site", "exclude_sites", "location", "language", "region", "page",
@@ -3421,10 +3413,6 @@ class MasterFetchServer:
 
         elif name == "cache_clear":
             result = await self.cache_clear(all=args.get("all", False))
-            return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
-
-        elif name == "version":
-            result = await self.version()
             return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
 
         elif name == "parse":
@@ -3438,7 +3426,9 @@ class MasterFetchServer:
                 max_items=args.get("max_items", 20),
                 timeout=args.get("timeout", 20),
             )
-            return [TextContent(type="text", text=_j.dumps(result, ensure_ascii=False))], result
+            # structured_content 只接受 dict，list 会触发 MCP SDK 校验错误
+            # （-32603 Handler returned an invalid result）。包一层 dict。
+            return [TextContent(type="text", text=_j.dumps(result, ensure_ascii=False))], {"feeds": result}
 
         elif name == "resolve_url":
             import json as _j

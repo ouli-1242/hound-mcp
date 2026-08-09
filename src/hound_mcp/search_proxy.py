@@ -280,7 +280,13 @@ def _kick_health_check() -> None:
         return
     try:
         _health_task = asyncio.create_task(pool.health_check())
-        _health_task.add_done_callback(lambda _t: _health_task is not None)
+
+        def _on_done(_t: "asyncio.Task") -> None:
+            # 任务完成后置回 None，让下一次搜索能重新探测新加入/恢复的代理
+            global _health_task
+            _health_task = None
+
+        _health_task.add_done_callback(_on_done)
     except RuntimeError:
         # No running event loop (called outside async context) — skip; the
         # next search that creates the pool retries.

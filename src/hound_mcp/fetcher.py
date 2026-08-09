@@ -15,11 +15,16 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Union
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import primp
 
 logger = logging.getLogger("hound_mcp.fetcher")
+
+
+def _urljoin(base: str, location: str) -> str:
+    """解析重定向 Location（相对/绝对）为完整 URL。"""
+    return urljoin(base, location)
 
 
 # ─── Response ────────────────────────────────────────────────────────────────
@@ -377,11 +382,15 @@ class HTTPSession:
         follow_redirects: Union[bool, str] = True,
         max_redirects: int = 5,
         params: Optional[Dict[str, str]] = None,
+        allow_internal: bool = False,
         **kwargs: Any,
     ) -> Response:
         """Fetch a URL via HTTP with TLS impersonation.
 
         Returns a Response object.
+
+        ``allow_internal``: 重定向目标是否允许内网地址（默认 False，SSRF
+        防护——每跳校验。仅测试/可信环境可开启）。
         """
         # Coerce follow_redirects from scrapling-style string to bool.
         # Scrapling accepted: "safe", "always", "never". primp expects bool.
@@ -420,14 +429,42 @@ class HTTPSession:
                         from urllib.parse import urlencode
                         separator = "&" if "?" in req_url else "?"
                         req_url = f"{req_url}{separator}{urlencode(params)}"
-                    return client.get(
-                        req_url,
-                        headers=final_headers,
-                        timeout=actual_timeout,
-                        follow_redirects=follow_redirects,
-                    )
 
-                resp = await asyncio.to_thread(_do_get)
+                    # 手动跟随重定向：不依赖 primp 内部跟随（否则重定向目标不经
+                    # validate_url 复检，构成 SSRF 绕过）。每跳校验目标 URL，
+                    # 受 max_redirects 控制。primp follow_redirects=False 时
+                    # 返回 3xx 原始响应，由本循环解析 Location 继续。
+                    current = req_url
+                    for _hop in range(max_redirects + 1):
+                        resp = client.get(
+                            current,
+                            headers=final_headers,
+                            timeout=actual_timeout,
+                            follow_redirects=False,
+                        )
+                        if not (follow_redirects and resp.status_code in (301, 302, 303, 307, 308)):
+                            return resp, current
+                        location = ""
+                        rh = resp.headers if hasattr(resp, "headers") else {}
+                        for k, v in rh.items():
+                            if k.lower() == "location":
+                                location = v
+                                break
+                        if not location:
+                            return resp, current
+                        from hound_mcp.security import SecurityError, validate_url
+                        try:
+                            next_url = _urljoin(current, location)
+                            validate_url(next_url, allow_internal=allow_internal)
+                        except SecurityError as se:
+                            logger.warning(
+                                f"redirect target rejected for {current}: {str(se)[:200]}"
+                            )
+                            raise
+                        current = next_url
+                    return resp, current
+
+                resp, final_url = await asyncio.to_thread(_do_get)
 
                 # Parse encoding from content-type
                 resp_headers = dict(resp.headers) if hasattr(resp, "headers") else {}
@@ -451,7 +488,7 @@ class HTTPSession:
                         pass
 
                 return Response(
-                    url=str(resp.url) if hasattr(resp, "url") else url,
+                    url=final_url if final_url else (str(resp.url) if hasattr(resp, "url") else url),
                     body=resp.content if hasattr(resp, "content") else b"",
                     status=resp.status_code if hasattr(resp, "status_code") else 0,
                     headers=resp_headers,

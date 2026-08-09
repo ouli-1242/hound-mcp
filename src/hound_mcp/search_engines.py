@@ -45,7 +45,8 @@ def _get_metasearch():
 
 # Public default engine pool (the full keyless backend set; order = rough
 # preference). `engines=None` in smart_search uses this via the metasearch.
-DEFAULT_ENGINES = ("duckduckgo", "brave", "yahoo", "yandex")
+# bing 排首位：国内网无需 VPN 即可用（cn.bing.com），其余受网络环境影响。
+DEFAULT_ENGINES = ("bing", "duckduckgo", "brave", "yahoo", "yandex")
 
 # Index family per backend (by the underlying index/provider, for consensus).
 # A URL returned by duckduckgo AND yahoo is ONE family (both Bing's index);

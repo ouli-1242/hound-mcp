@@ -166,8 +166,9 @@ class TestExtractEncoding:
 class TestFollowRedirectsCoercion:
 
     @pytest.mark.asyncio
-    async def test_string_safe_coerced_to_true(self):
-        # scrapling-style "safe" -> True
+    async def test_string_safe_coerced_to_follow(self):
+        # scrapling-style "safe" -> 手动跟随（primp 收 follow_redirects=False，
+        # 由 HTTPSession 逐跳校验目标 URL 后自行跟随）
         session = HTTPSession()
         session._client = MagicMock()
         mock_resp = MagicMock()
@@ -180,9 +181,9 @@ class TestFollowRedirectsCoercion:
         session._client.get = MagicMock(return_value=mock_resp)
 
         await session.get("https://example.com", follow_redirects="safe")
-        # The actual call should pass follow_redirects=True
+        # primp 收到 False（手动跟随由本层实现，重定向目标逐跳 SSRF 校验）
         call_kwargs = session._client.get.call_args
-        assert call_kwargs.kwargs.get("follow_redirects") is True
+        assert call_kwargs.kwargs.get("follow_redirects") is False
 
     @pytest.mark.asyncio
     async def test_string_never_coerced_to_false(self):

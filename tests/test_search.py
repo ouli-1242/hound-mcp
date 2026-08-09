@@ -380,11 +380,11 @@ class TestMultiSearchMapping:
 
 class TestEngineConfig:
 
-    def test_default_engines_has_four(self):
-        assert len(DEFAULT_ENGINES) == 4
+    def test_default_engines_has_five(self):
+        assert len(DEFAULT_ENGINES) == 5
 
     def test_default_engines_contains_key_backends(self):
-        for engine in ("duckduckgo", "brave", "yahoo", "yandex"):
+        for engine in ("bing", "duckduckgo", "brave", "yahoo", "yandex"):
             assert engine in DEFAULT_ENGINES
 
     def test_index_family_mapping(self):

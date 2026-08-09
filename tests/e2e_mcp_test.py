@@ -158,24 +158,22 @@ def test_tool_definitions(mcp):
     tools = result.get("result", {}).get("tools", [])
     tool_map = {t["name"]: t for t in tools}
 
-    fetch_desc = tool_map["mcp_smart_fetch"]["description"]
+    fetch_desc = tool_map["smart_fetch"]["description"]
     assert "Fetch any URL" in fetch_desc
     assert "offset" in fetch_desc.lower() and "html" in fetch_desc.lower()
 
-    offset_desc = tool_map["mcp_smart_fetch"]["inputSchema"]["properties"]["offset"]["description"]
+    offset_desc = tool_map["smart_fetch"]["inputSchema"]["properties"]["offset"]["description"]
     assert "next_offset" in offset_desc
 
-    assert "cache" in tool_map["mcp_smart_search"]["description"].lower() or \
-        "cached" in tool_map["mcp_smart_search"]["description"].lower()
+    assert "cache" in tool_map["smart_search"]["description"].lower() or \
+        "cached" in tool_map["smart_search"]["description"].lower()
 
     cache_desc = tool_map["cache_clear"]["description"]
     assert "TTL" in cache_desc or "ttl" in cache_desc or "cache stores" in cache_desc.lower()
 
-    assert "version" in tool_map
-
 
 def test_smart_fetch_response_fields(mcp):
-    resp = mcp.call_tool("mcp_smart_fetch", {"url": "https://example.com", "cache_ttl": 0})
+    resp = mcp.call_tool("smart_fetch", {"url": "https://example.com", "cache_ttl": 0})
     data = _extract_data(resp.get("result", {}))
     assert data.get("total_extracted_chars", 0) > 0
     is_trunc = data.get("is_truncated", False)
@@ -186,25 +184,8 @@ def test_smart_fetch_response_fields(mcp):
         assert next_off == 0
 
 
-def test_version_tool(mcp):
-    """Reports the version that is *installed* on this machine.
-
-    Pre-fix hardcoded `"3.3.1"` and broke on every release since. Now it
-    reads `importlib.metadata.version("hound-mcp")` and asserts the server
-    matches — the actual contract we care about.
-    """
-    import importlib.metadata
-    installed = importlib.metadata.version("hound-mcp")
-
-    resp = mcp.call_tool("version", {})
-    data = _extract_data(resp.get("result", {}))
-    assert data.get("version") == installed, (
-        f"Server reports {data.get('version')!r}, package on disk is {installed!r}"
-    )
-
-
 def test_error_response_format(mcp):
-    resp = mcp.call_tool("mcp_smart_fetch", {})
+    resp = mcp.call_tool("smart_fetch", {})
     assert resp.get("result", {}).get("isError", False) is True
 
     resp2 = mcp.call_tool("nonexistent_tool_xyz", {})
@@ -213,7 +194,7 @@ def test_error_response_format(mcp):
 
 def test_bulk_url_limit(mcp):
     fake_urls = [f"https://example{i}.com" for i in range(101)]
-    resp = mcp.call_tool("mcp_smart_fetch", {"urls": fake_urls})
+    resp = mcp.call_tool("smart_fetch", {"urls": fake_urls})
     result = resp.get("result", {})
     assert result.get("isError", False) is True, \
         f"101 URLs should trigger error. isError={result.get('isError')}"

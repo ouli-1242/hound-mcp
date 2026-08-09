@@ -68,7 +68,6 @@ all = [
 [project.urls]
 Repository = "https://github.com/ouli-1242/hound-mcp"
 Issues = "https://github.com/ouli-1242/hound-mcp/issues"
-Changelog = "https://github.com/ouli-1242/hound-mcp/blob/master/CHANGELOG.md"
 
 [project.scripts]
 hound = "hound_mcp.cli:main"

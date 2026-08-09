@@ -139,7 +139,11 @@ def _fetch(http_get: HttpGet, url: str) -> Optional[bytes]:
 
 
 def _robots_sitemaps(start_url: str, http_get: HttpGet) -> tuple[list[str], bool]:
-    """Fetch /robots.txt and return its Sitemap: directives (absolute URLs)."""
+    """Fetch /robots.txt and return its Sitemap: directives (absolute URLs).
+
+    SSRF 防护：robots.txt 的 ``Sitemap:`` 指令可能指向内网（攻击者站点
+    声明 ``Sitemap: http://169.254.169.254/...``），抓取前逐条校验。
+    """
     p = urlparse(start_url)
     robots_url = f"{p.scheme or 'https'}://{p.netloc}/robots.txt"
     body = _fetch(http_get, robots_url)
@@ -155,7 +159,14 @@ def _robots_sitemaps(start_url: str, http_get: HttpGet) -> tuple[list[str], bool
         if line.lower().startswith("sitemap:"):
             val = line.split(":", 1)[1].strip()
             if val:
-                out.append(urljoin(robots_url, val))
+                candidate = urljoin(robots_url, val)
+                # SSRF：拒绝指向内网/保留地址的 sitemap URL
+                try:
+                    from hound_mcp.security import validate_url
+                    validate_url(candidate)
+                except Exception:
+                    continue
+                out.append(candidate)
     # de-dup, preserve order
     seen: set[str] = set()
     uniq = [u for u in out if not (u in seen or seen.add(u))]
@@ -202,6 +213,12 @@ def discover_sitemap(start_url: str, *, http_get: HttpGet,
         if sitemap_url in visited_sitemaps:
             return
         visited_sitemaps.add(sitemap_url)
+        # SSRF：sitemapindex 子 URL 可能指向内网，抓取前校验
+        try:
+            from hound_mcp.security import validate_url
+            validate_url(sitemap_url)
+        except Exception:
+            return
         body = _fetch(http_get, sitemap_url)
         if body is None:
             return

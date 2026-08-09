@@ -61,6 +61,16 @@ class SecurityError(ValueError):
     pass
 
 
+def _dns_recheck_enabled() -> bool:
+    """是否开启域名 DNS 解析内网复查（HOUND_SSRF_DNS_RECHECK=1）。
+
+    默认关闭：DNS 污染/分流环境（公网域名被解析到保留地址）会误伤合法请求。
+    模块启动时读取一次并缓存。
+    """
+    import os
+    return os.environ.get("HOUND_SSRF_DNS_RECHECK", "").strip() in ("1", "true", "True")
+
+
 def _normalize_ip_notation(host: str) -> str | None:
     """Resolve alternate IP notations that curl/libcurl would resolve.
 
@@ -278,6 +288,32 @@ def validate_url(url: str, allow_internal: bool = False) -> str:
             # Block DNS rebinding services that resolve to internal IPs
             if hostname_lower.endswith(_DNS_REBINDING_SUFFIXES):
                 raise SecurityError(f"URL uses DNS rebinding service: {hostname}")
+            # 纵深防御（报告声明 4）：域名经 DNS 解析到的内网 IP 复查。
+            # 默认关闭（HOUND_SSRF_DNS_RECHECK=1 开启）：在 DNS 污染/分流环境
+            # （如被墙地区公网域名被解析到 198.18.0.0/15 等保留地址）会误伤
+            # 所有合法公网请求。开启后只对"解析成功且命中内网"拒绝；
+            # 解析失败（gaierror/超时）容忍。注意存在 DNS rebinding TOCTOU
+            # 竞态，作为纵深防御而非唯一防线。
+            if _dns_recheck_enabled():
+                try:
+                    import socket as _socket
+                    infos = _socket.getaddrinfo(hostname, None)
+                except Exception:
+                    infos = []
+                for info in infos:
+                    info_ip = info[4][0]
+                    try:
+                        resolved = ipaddress.ip_address(info_ip.split("%")[0])
+                    except ValueError:
+                        continue
+                    for network in _PRIVATE_NETWORKS:
+                        try:
+                            if resolved in network:
+                                raise SecurityError(
+                                    f"URL hostname {hostname} resolves to internal/private IP ({info_ip} in {network})"
+                                )
+                        except TypeError:
+                            pass
 
     return url
 

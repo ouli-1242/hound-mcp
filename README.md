@@ -6,13 +6,7 @@
 
 抓取 · 爬取 · 绕过反爬 · 读取 PDF（含扫描件）· 搜索网页
 
-[![PyPI](https://img.shields.io/pypi/v/hound-mcp.svg?label=pypi)](https://pypi.org/project/hound-mcp/)
-[![Python](https://img.shields.io/pypi/pyversions/hound-mcp.svg)](https://pypi.org/project/hound-mcp/)
-[![License: MIT](https://img.shields.io/pypi/l/hound-mcp.svg)](LICENSE)
-
-```bash
-pip install hound-mcp[all] && playwright install chromium
-```
+[MIT](LICENSE)
 
 </div>
 
@@ -21,8 +15,10 @@ pip install hound-mcp[all] && playwright install chromium
 ## 快速开始
 
 ```bash
-pip install hound-mcp[all]          # 完整版：抓取 + 爬取 + 搜索 + PDF + OCR + 神经重排序
-playwright install chromium         # 反检测浏览器引擎
+git clone https://github.com/ouli-1242/hound-mcp.git
+cd hound-mcp
+pip install -e .[all]                    # 完整版：抓取 + 爬取 + 搜索 + PDF + OCR
+playwright install chromium              # 反检测浏览器引擎
 ```
 
 然后在任何 MCP 客户端中指向 `hound` 命令即可。无需参数、无需密钥、无需环境变量。
@@ -30,33 +26,30 @@ playwright install chromium         # 反检测浏览器引擎
 ```bash
 hound -v          # 查看版本 + 更新状态
 hound -u          # 更新到最新版
-hound --doctor    # 健康检查 + 网络诊断
-hound --rollback  # 回滚上次更新
 ```
 
 ---
 
-## 9 个工具
+## 8 个工具
 
 | 工具 | 功能 |
 |------|------|
 | `smart_fetch` | 抓取任意 URL。HTTP 优先，被拦截时自动升级到反检测浏览器。支持批量、PDF（OCR）、`focus` 聚焦、`actions` 页面交互、`schema` 结构化提取（含 auto 模式）、分页。 |
 | `smart_crawl` | 同域最佳优先爬取。Sitemap 模式、`search` 关键词过滤、内容自适应提取、时间 + token 预算控制。 |
-| `smart_search` | 本地无密钥搜索。10 个后端并行、神经重排序、跨引擎共识、六信号排名。`fetch_content=true` 自动抓取 top3 全文。 |
-| `smart_research` | 一键研究：搜索 → 抓取 top N → focus 提取 → 去重合并。替代 5+ 次手动调用。 |
-| `parse` | 本地文件解析（.html/.docx/.xlsx/.csv → Markdown）。 |
-| `smart_monitor` | 页面变化监控。快照对比 + diff 摘要。 |
+| `smart_search` | 本地无密钥搜索。多后端并行、神经重排序、跨引擎共识、六信号排名。`fetch_content=true` 自动抓取 top3 全文。 |
 | `screenshot` | 页面截图（多模态代理专用）。 |
+| `parse` | 本地文件解析（.html/.docx/.xlsx/.csv → Markdown）。 |
+| `feed_fetch` | 批量抓取 RSS/Atom feed 最新条目（更新日志 / 发布说明 / 博客追踪）。 |
+| `resolve_url` | 解析 URL 最终地址（跟随重定向、不下载页面体）。 |
 | `cache_clear` | 清除抓取缓存。 |
-| `version` | 版本 + 更新状态。 |
 
 ---
 
 ## 本地无密钥搜索
 
-无需 API key、无需账户。`smart_search` 在本机并行运行 **10 个无密钥后端**，合并、去重、用本地 ONNX 交叉编码器排序。
+无需 API key、无需账户。`smart_search` 在本机并行运行无密钥后端，合并、去重、用本地 ONNX 交叉编码器排序。
 
-- **10 个后端**：duckduckgo、brave、mojeek、yahoo、yandex、startpage、google、qwant（+ 可选 wikipedia、grokipedia）
+- **无密钥后端**：bing（国内网可用）、duckduckgo、brave、yahoo、yandex（默认池；可加量 wikipedia、grokipedia；`engines=` 最多 9 个）
 - **神经重排序**：`ms-marco-MiniLM-L-6-v2`，本地运行，$0
 - **六信号排名**：共识 + 域名声誉 + 答案信号 + 标题相关 + URL 相关 + 来源类型
 - **跨引擎共识**：多个独立索引返回的 URL 获得排名加成
@@ -113,7 +106,7 @@ hound --rollback  # 回滚上次更新
 |---|---|---|---|---|
 | **价格** | $0 永久 | $0 | 免费但限速 | $0 自托管 / 1K 免费 |
 | **本地运行** | 是 | 是 | 否 | 需要 Docker+Redis |
-| **网页搜索** | 有（10 后端） | **无** | 有 | **无** |
+| **网页搜索** | 有（多后端） | **无** | 有 | **无** |
 | **反爬** | 内置 | 有限 | 无 | 默认无 |
 | **PDF + OCR** | 有 | 部分 | 有 | 云端付费 |
 | **Agent 信号** | 有 | 无 | 无 | 无 |
@@ -123,28 +116,32 @@ hound --rollback  # 回滚上次更新
 
 ## 安装
 
-### 从 PyPI 安装
+> 本项目为本地自制项目，未发布到 PyPI，请从源码安装。
 
-```bash
-pip install hound-mcp[all]          # 完整版
-playwright install chromium
-```
-
-精简安装（仅 HTTP，无浏览器）：`pip install hound-mcp`
-
-### 从源码安装
+### 完整安装（含反爬浏览器）
 
 ```bash
 git clone https://github.com/ouli-1242/hound-mcp.git
 cd hound-mcp
 
-# 开发模式（改代码立即生效，但移动目录会失效）
+# 普通安装（代码复制到 site-packages，源码目录可随意移动）
+pip install .[all]
+playwright install chromium      # 下载反检测浏览器引擎（~150MB）
+
+# 开发模式（editable，改代码立即生效，源码目录不可移动）
 pip install -e .[all]
 playwright install chromium
+```
 
-# 或者：普通模式（代码复制到 site-packages，源码目录可随意移动）
-pip install .[all]
-playwright install chromium
+> **浏览器依赖说明**：`[all]` 包含 patchright + playwright + browserforge，
+> `playwright install chromium` 下载的浏览器用于 `smart_fetch` 的反爬升级层
+> （JS 渲染 / Cloudflare 求解 / 截图）。**不装浏览器**时 hound 仍可工作——
+> 走纯 HTTP 抓取 + 搜索，遇到 JS 壳/反爬页面会失败并提示（优雅降级）。
+
+### 仅 HTTP + 搜索（无浏览器，精简）
+
+```bash
+pip install .
 ```
 
 ### 卸载
@@ -184,9 +181,12 @@ rm -rf ~/.hound                       # Linux/Mac
 |------|----------|
 | DataDome / Akamai / 交互式 Turnstile | 无法绕过。`next_action` 会提示换源。 |
 | 搜索引擎限速 | 多样性仲裁 + 熔断器兜底；重度使用设 `HOUND_SEARCH_PROXY`。 |
+| 国内网（无 VPN）搜索 | 默认池含 bing / yandex（国内可达）；duckduckgo / brave / yahoo 需 VPN。 |
+| 域名 DNS 解析内网复查 | 默认关闭（DNS 污染环境会误伤）；需严格 SSRF 保护时设 `HOUND_SSRF_DNS_RECHECK=1`。 |
+| Bright Data SERP | 默认启用（随代码内置密钥，仅个人自用）；`HOUND_BRIGHTDATA_API_KEY=` 置空可禁用。 |
 | 需要登录的网站 | 不支持（不在设计范围内）。 |
 | YouTube | 只能获取少量文本。 |
 
 ---
 
-**MIT 协议** · [PyPI](https://pypi.org/project/hound-mcp/)
+**MIT 协议**

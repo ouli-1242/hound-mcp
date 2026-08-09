@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import ssl
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cached_property
@@ -80,7 +81,9 @@ def _get_search_proxy() -> str | None:
 _SEARCH_DEADLINE = float(os.environ.get("HOUND_SEARCH_DEADLINE", "16") or "16")
 _ua = UserAgent()
 
-# Bright Data SERP API (optional, priority backend when configured)
+# Bright Data SERP API (priority backend when configured)
+# 用户自用：硬编码默认密钥（HOUND_BRIGHTDATA_API_KEY 可覆盖为空则禁用）。
+# 注意：此密钥随代码分发，仅适合个人自用；若共享/发布代码请移除。
 _BRIGHTDATA_API_KEY = os.environ.get("HOUND_BRIGHTDATA_API_KEY") or "a2646fc2-1de1-469f-aa83-910efd45dfd0"
 _BRIGHTDATA_ZONE = os.environ.get("HOUND_BRIGHTDATA_ZONE", "hound")
 _BRIGHTDATA_ENDPOINT = "https://api.brightdata.com/request"
@@ -171,7 +174,13 @@ def _random_ssl_context(verify: bool = True) -> ssl.SSLContext:
 
 
 class _H2Patch:
-    """Randomize HTTP/2 SETTINGS frame to dodge JA3/JA4 fingerprinting (DuckDuckGo)."""
+    """Randomize HTTP/2 SETTINGS frame to dodge JA3/JA4 fingerprinting (DuckDuckGo).
+
+    线程安全：patch 挂在 httpcore 类方法上，并发请求必须串行化
+    （否则线程交错 patch/restore 会把补丁永久留在类上或恢复错版本）。
+    """
+
+    _lock = threading.Lock()
 
     def __enter__(self) -> None:
         def _send_connection_init(self: httpcore._sync.http2.HTTP2Connection, request: httpcore.Request) -> None:
@@ -191,11 +200,13 @@ class _H2Patch:
             self._h2_state.increment_flow_control_window(2**24)
             self._write_outgoing_data(request)
 
+        self._lock.acquire()
         self._orig = httpcore._sync.http2.HTTP2Connection._send_connection_init
         httpcore._sync.http2.HTTP2Connection._send_connection_init = _send_connection_init  # type: ignore[method-assign]
 
     def __exit__(self, *exc: Any) -> None:
         httpcore._sync.http2.HTTP2Connection._send_connection_init = self._orig  # type: ignore[method-assign]
+        self._lock.release()
 
 
 class _HttpxResponse:
@@ -227,6 +238,31 @@ class _HttpxClient:
                 if "timed out" in f"{ex}":
                     raise MetaTimeoutException(f"Request timed out: {ex!r}") from ex
                 raise MetaSearchException(f"{type(ex).__name__}: {ex!r}") from ex
+
+
+class _StdHttpxClient:
+    """标准 httpx client（无随机 ciphers / H2Patch）——用于对 TLS 敏感的站点。
+
+    `_HttpxClient` 的随机化 TLS 指纹偶发触发服务器连接重置（如 Bing 的
+    10054）；标准 httpx 客户端指纹稳定，兼容性最好。代价是反爬识别度低，
+    仅用于 Bing 这类对 TLS 协商敏感的站点。
+    """
+
+    def __init__(self, headers: dict[str, str] | None = None, proxy: str | None = None,
+                 timeout: int | None = 10, *, verify: bool = True) -> None:
+        self.client = httpx.Client(
+            headers=headers, proxy=proxy, timeout=timeout,
+            verify=verify, follow_redirects=False, http2=False,
+        )
+
+    def request(self, *args: Any, **kwargs: Any) -> _HttpxResponse:
+        try:
+            resp = self.client.request(*args, **kwargs)
+            return _HttpxResponse(resp.status_code, resp.content, resp.text)
+        except Exception as ex:
+            if "timed out" in f"{ex}":
+                raise MetaTimeoutException(f"Request timed out: {ex!r}") from ex
+            raise MetaSearchException(f"{type(ex).__name__}: {ex!r}") from ex
 
 
 # ─── result type ─────────────────────────────────────────────────────────────
@@ -507,9 +543,103 @@ class Yandex(BaseSearchEngine):
         return payload
 
 
+# ─── Bing (CN + intl; free, keyless, reachable from mainland CN) ─────────────
+# 国内网可用：cn.bing.com 稳定可达；国际版 www.bing.com 作为回退。
+# provider 复用 "bing" 索引家族（与 DuckDuckGo/Yahoo 同源，共识合并）。
+# transport 用 httpx（非 primp）：primp 的浏览器 TLS 指纹与 Bing 协商
+# 偶发 SelectedUnofferedKxGroup 失败，httpx 稳定。
+def _bing_decode_ck_url(href: str) -> str:
+    """从 Bing ck/a 跳转链接解码真实 URL。
+
+    形如 https://www.bing.com/ck/a?...&u=a1aHR0cHM6Ly93d3cucHl0aG9uLm9yZy8&ntb=1
+    ``u=`` 参数 = "a1" + base64(URL-safe) 编码的真实 URL。解析失败返回原样。
+    """
+    try:
+        from urllib.parse import parse_qs, urlparse
+        params = parse_qs(urlparse(href).query)
+        u = params.get("u", [""])[0]
+        if not u:
+            return href
+        # 去掉 "a1" 前缀后 base64 解码（URL-safe，可能带 -_ 而非 +/）
+        b64 = u[2:] if u.startswith("a1") else u
+        b64 += "=" * (-len(b64) % 4)
+        import base64
+        decoded = base64.urlsafe_b64decode(b64).decode("utf-8", errors="replace")
+        return decoded if decoded.startswith(("http://", "https://")) else href
+    except Exception:
+        return href
+
+
+class Bing(BaseSearchEngine):
+    name = "bing"
+    provider = "bing"
+    search_url = "https://cn.bing.com/search"
+    search_method = "GET"
+    items_xpath = "//li[contains(@class, 'b_algo')]"
+    elements_xpath: ClassVar[Mapping[str, str]] = {
+        "title": ".//h2//text()", "href": ".//h2/a/@href", "body": ".//p//text()",
+    }
+    # Bing 对单 IP 高频请求随机限流（连接重置/空结果），重试可显著提高命中率
+    _retries = 2
+    _retry_delay = 0.6
+
+    def __init__(self, proxy: str | None = None, timeout: int | None = None, *, verify: bool = True) -> None:
+        # Bing 用标准 httpx.Client（非 _HttpxClient）：随机 ciphers / H2Patch
+        # 与 Bing 偶发 TLS 重置（10054），标准客户端最稳定。
+        self.headers = {"User-Agent": _ua.random}
+        self.http_client = _StdHttpxClient(headers=self.headers, proxy=proxy, timeout=timeout, verify=verify)  # type: ignore[assignment]
+        self.results: list[Any] = []
+
+    def search(self, query: str, region: str = "us-en", safesearch: str = "moderate",
+               timelimit: str | None = None, page: int = 1, **kwargs: str) -> list[Any] | None:
+        """Bing 网络抖动/限流时重试（连接重置或空结果都重试）。"""
+        import time as _time
+        last: list[Any] | None = None
+        for attempt in range(self._retries + 1):
+            try:
+                last = super().search(query, region=region, safesearch=safesearch,
+                                      timelimit=timelimit, page=page, **kwargs)
+            except Exception:
+                last = None
+            if last:
+                return last
+            if attempt < self._retries:
+                _time.sleep(self._retry_delay)
+        return last
+
+    def build_payload(self, query: str, region: str, safesearch: str,  # noqa: ARG002
+                      timelimit: str | None, page: int = 1, **kwargs: str) -> dict[str, Any]:
+        payload = {"q": query, "ensearch": "1"}
+        if page > 1:
+            payload["first"] = f"{(page - 1) * 10 + 1}"
+        if timelimit:
+            payload["filters"] = f"ex1:\"ez{timelimit}\""
+        return payload
+
+    def post_extract_results(self, results: list[Any]) -> list[Any]:
+        """解码 Bing ck/a 跳转链接，过滤 bing 自身页面。
+
+        Bing 结果链接形如 https://www.bing.com/ck/a?...&u=a1aHR0cHM6Ly93d3cu...
+        ——真实 URL base64 编码在 ``u=`` 参数（a1 头 + base64，URL-safe）。
+        """
+        out = []
+        for r in results:
+            href = r.href.strip()
+            if not href:
+                continue
+            if "bing.com/ck/a" in href:
+                href = _bing_decode_ck_url(href)
+            # 过滤 bing 自身页面
+            if href and ("bing.com" in href and "/search" not in href and "/ck/a" not in href):
+                continue
+            r.href = href
+            out.append(r)
+        return out
+
+
 # ─── registry ────────────────────────────────────────────────────────────────
-# All enabled text backends. Bing is disabled (DDG + Yahoo already serve its
-# index). Order = rough preference; the aggregator runs them all in parallel.
+# All enabled text backends. Bing is enabled (free/keyless, reachable from
+# mainland CN without VPN). Order = rough preference; run all in parallel.
 _TEXT_ENGINES: dict[str, type[BaseSearchEngine]] = {
     "duckduckgo": Duckduckgo,
     "brave": Brave,
@@ -517,16 +647,19 @@ _TEXT_ENGINES: dict[str, type[BaseSearchEngine]] = {
     "wikipedia": Wikipedia,
     "yahoo": Yahoo,
     "yandex": Yandex,
+    "bing": Bing,
 }
 # Map hound's public engine names -> metasearch backends.
 _HOUND_TO_BACKEND = {
     "duckduckgo": "duckduckgo", "ddg": "duckduckgo",  # ddg is a common alias
-    "bing": "yahoo",  # bing -> yahoo (same index, diff server)
+    "bing": "bing",
     "yahoo": "yahoo", "wikipedia": "wikipedia",
     "brave": "brave", "yandex": "yandex",
     "grokipedia": "grokipedia",
 }
-_DEFAULT_BACKENDS = ["duckduckgo", "brave", "yahoo", "yandex"]
+# 国内网默认池：bing/yandex 可达无需 VPN；ddg/brave/yahoo 需 VPN。
+# 保留完整池（VPN 时更多信号），但 bing 排首位作为国内稳定兜底。
+_DEFAULT_BACKENDS = ["bing", "duckduckgo", "brave", "yahoo", "yandex"]
 
 
 # ─── Bright Data SERP API (priority backend) ────────────────────────────────
