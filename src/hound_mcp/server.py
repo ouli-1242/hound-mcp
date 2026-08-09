@@ -244,7 +244,27 @@ IDLE_CHECK_INTERVAL = 60  # How often to check for idle sessions (seconds)
 # connect by clients that support it. This is the connect-time mastery doc:
 # the #1 workflow, the gotchas, and when to use each tool. Kept tight (~300
 # tokens) since it is paid once, not per-turn-per-tool.
-HOUND_INSTRUCTIONS = ""
+HOUND_INSTRUCTIONS = (
+    "Hound: keyless web fetching, crawling and search - no API keys needed. "
+    "Use it instead of guessing URLs or using built-in fetch when you need "
+    "the real page content.\n"
+    "Pick tool by task:\n"
+    "- any web page/PDF content: smart_fetch (auto anti-bot, focus= to extract "
+    "only relevant paragraphs, pages= for PDF ranges, urls= for parallel bulk)\n"
+    "- many pages from one domain: smart_crawl (two-phase: sitemap=true to map, "
+    "then crawl_urls= to fetch only what you need)\n"
+    "- find what to fetch: smart_search (returns ranked URLs only - NEVER answer "
+    "from snippets, always smart_fetch the top results with focus=your question)\n"
+    "- RSS/Atom changelog tracking: feed_fetch\n"
+    "- local file to markdown: parse (not PDF - that goes through smart_fetch)\n"
+    "- screenshots for multimodal agents: mcp_screenshot (text agents: smart_fetch)\n"
+    "- check a short link before fetching: resolve_url\n"
+    "GOTCHAS: check response signals before trusting content - content_ok=false "
+    "means JS shell/login wall (don't cite it); page_type='list' means fetch the "
+    "linked pages; is_stale/next_action tell you the optimal next call. "
+    "Reuse cache (default 1h); cache_ttl=0 forces fresh. Unbypassable anti-bot "
+    "= switch source, don't retry."
+)
 
 class ResponseModel(BaseModel):
     """Request's response information structure."""
@@ -2214,7 +2234,7 @@ class MasterFetchServer:
         main_content_only: Annotated[bool, Field(description="Strip nav, ads, footers (default True).")] = True,
         use_trafilatura: Annotated[bool, Field(description="Use Trafilatura for cleaner article extraction (default True).")] = True,
         cache_ttl: Annotated[int, Field(description="Cache duration in seconds. Default 3600 (1 hour). Set 0 to skip cache and force a fresh fetch.")] = DEFAULT_TTL,
-        force_fetcher: Annotated[Optional[Literal["http", "dynamic", "stealthy"]], Field(description="Lock to one fetcher tier. 'http' = fast HTTP-only, 'dynamic' = Playwright JS rendering, 'stealthy' = Cloudflare bypass. Skips auto-escalation.")] = None,
+        force_fetcher: Annotated[Optional[Literal["http", "dynamic", "stealthy"]], Field(description="Lock to one fetcher tier, skip auto-escalation. 'http' = fast HTTP-only (fails on JS/bot walls). 'stealthy' = anti-detect browser (Patchright). 'dynamic' is a legacy alias for 'stealthy'. Exposed to clients as: ['http', 'stealthy'].")] = None,
         headless: Annotated[bool, Field(description="Run browser without visible window (default True).")] = True,
         real_chrome: Annotated[bool, Field(description="Use installed Chrome instead of bundled browser.")] = False,
         wait: Annotated[int | float, Field(description="Extra milliseconds to wait after page load for JS rendering.")] = 0,
@@ -2240,7 +2260,9 @@ class MasterFetchServer:
         """Fetch a URL (or multiple URLs) with automatic anti-bot escalation.
 
         Use this for ALL web page fetching. It auto-selects the best method:
-        HTTP (fast, curl_cffi) → Dynamic (Playwright, JS rendering) → Stealthy (Cloudflare bypass).
+        HTTP (fast, curl_cffi) → Stealthy (anti-detect browser; handles JS
+        rendering and Cloudflare-style bot walls. The legacy 'dynamic' tier was
+        merged into it).
 
         When to use:
         - Fetching any web page for content extraction
@@ -2952,9 +2974,10 @@ class MasterFetchServer:
     ) -> SearchResponseModel:
         """Local keyless web search (no API key, no account, no third-party service).
 
-        Runs 9 keyless backends in parallel (duckduckgo, brave, mojeek, yahoo,
-        yandex, startpage, google + opt-in wikipedia, grokipedia; engines= to
-        choose), merges + dedups + ranks by neural relevance + cross-backend
+        Runs 6 keyless backends in parallel (duckduckgo, brave, yahoo,
+        yandex, wikipedia, grokipedia; default: duckduckgo, brave, yahoo,
+        yandex - engines= to choose), merges + dedups + ranks by neural
+        relevance + cross-backend
         consensus (a URL returned by several independent indexes is an authority
         signal). Returns URLs + ranking, not page content - smart_fetch the
         results you want. Each result has
@@ -3132,12 +3155,12 @@ class MasterFetchServer:
         },
         {
             "name": "mcp_smart_search",
-            "description": "Keyless web search (no API key, no account). 10 backends in parallel (ddg,brave,mojeek,yahoo,yandex,startpage,google,qwant + opt-in wikipedia,grokipedia), neural-reranked + cross-backend consensus. Returns URLs + ranking, NOT content. \n\nWORKFLOW: Search -> smart_fetch the high-relevance results (fetch_relevance=high first). Use focus='your question' on each fetch to extract only relevant paragraphs and save tokens. Use urls=[...] to bulk-fetch multiple results in one call. \n\nANTI-PATTERN: Don't search for something you already have a URL for - use smart_fetch with focus= instead. NEVER answer from snippets alone - always fetch the page. \n\nFILTERS (in options): site='domain.com' restricts to one domain. exclude_sites=['pinterest.com'] removes noise. freshness='day|week|month|year' for time-sensitive queries (use 'week' or 'month' for recent info). page=0-10 for pagination. location/language/region for geo. \n\nRESULT FIELDS: relevance_score (0-1), fetch_relevance (high/med/low - fetch high first), engines_consensus (how many independent indexes returned this URL - higher = more authoritative). related_queries can suggest better search terms - try them if initial results miss the target.",
+            "description": "Keyless web search (no API key, no account). 6 backends in parallel (duckduckgo,brave,yahoo,yandex,wikipedia,grokipedia; default pool: duckduckgo,brave,yahoo,yandex), neural-reranked + cross-backend consensus. Returns URLs + ranking, NOT content. \n\nWORKFLOW: Search -> smart_fetch the high-relevance results (fetch_relevance=high first). Use focus='your question' on each fetch to extract only relevant paragraphs and save tokens. Use urls=[...] to bulk-fetch multiple results in one call. \n\nANTI-PATTERN: Don't search for something you already have a URL for - use smart_fetch with focus= instead. NEVER answer from snippets alone - always fetch the page. \n\nFILTERS (in options): site='domain.com' restricts to one domain. exclude_sites=['pinterest.com'] removes noise. freshness='day|week|month|year' for time-sensitive queries (use 'week' or 'month' for recent info). page=0-10 for pagination. location/language/region for geo. \n\nRESULT FIELDS: relevance_score (0-1), fetch_relevance (high/med/low - fetch high first), engines_consensus (how many independent indexes returned this URL - higher = more authoritative). related_queries can suggest better search terms - try them if initial results miss the target.",
             "inputSchema": {
                 "type": "object", "required": ["query"],
                 "properties": {
                     "query": {"type": "string", "description": "Search query"},
-                    "options": {"type": "object", "description": "max_results (1-50,6), cache_ttl (300), mode (auto|neural|find_similar; auto=neural if [all]+model else consensus; find_similar needs url=), engines (list, default: ddg,brave,mojeek,yahoo,yandex,startpage,google,qwant; add 'wikipedia'/'grokipedia'), site (domain restrict), exclude_sites (list), location, language (2-letter), region, page (0-10), freshness (day|week|month|year), url (for find_similar), fetch_content (bool,false: auto-fetch top 3 results' page content with focus=query, saves N separate smart_fetch calls).", "additionalProperties": True},
+                    "options": {"type": "object", "description": "max_results (1-50,6), cache_ttl (300), mode (auto|neural|find_similar; auto=neural if [all]+model else consensus; find_similar needs url=), engines (list, default: ddg,brave,yahoo,yandex; add 'wikipedia'/'grokipedia'; 'bing' maps to yahoo), site (domain restrict), exclude_sites (list), location, language (2-letter), region, page (0-10), freshness (day|week|month|year), url (for find_similar), fetch_content (bool,false: auto-fetch top 3 results' page content with focus=query, saves N separate smart_fetch calls).", "additionalProperties": True},
                 },
             },
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
@@ -3172,7 +3195,7 @@ class MasterFetchServer:
         },
         {
             "name": "feed_fetch",
-            "description": "Fetch RSS/Atom feeds and return their latest entries (newest-first: title/url/published/summary) per feed. Batch: pass multiple feed URLs; each feed is parsed independently, a dead feed never fails the batch.",
+            "description": "Fetch RSS/Atom feeds and return their latest entries (newest-first: title/url/published/summary) per feed. Batch: pass multiple feed URLs; each feed is parsed independently, a dead feed never fails the batch. Use for changelog/release-notes/blog track. NOT a general page fetcher - use smart_fetch for that.",
             "inputSchema": {
                 "type": "object", "required": ["urls"],
                 "properties": {

@@ -6,9 +6,9 @@ async-native parallel aggregation with early-return-on-quorum, no CLI / API
 server / MCP / images / videos / news / books / extract / cache / network bloat.
 See the ddgs LICENSE notice in NOTICE.ddgs.txt for full attribution.
 
-Backends (all keyless, no API key, no account): duckduckgo, brave, google,
-grokipedia, mojeek, startpage, wikipedia, yahoo, yandex. They run in PARALLEL;
-a backend that CAPTCHAs / rate-limits / has no topic-match simply yields
+Backends (all keyless, no API key, no account): duckduckgo, brave,
+grokipedia, wikipedia, yahoo, yandex. They run in PARALLEL; a backend that
+CAPTCHAs / rate-limits / has no topic-match simply yields
 nothing and the others carry - so search is robust without any single point of
 failure. This is the robustness hound's hand-rolled 3-engine scraper never had.
 

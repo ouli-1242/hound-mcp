@@ -200,7 +200,7 @@ class SearchResult(BaseModel):
     title: str = Field(description="Result title")
     url: str = Field(description="Result URL")
     snippet: str = Field(default="", description="Result snippet from the engine")
-    source: str = Field(default="", description="Backend(s) that returned this result (duckduckgo/brave/mojeek/yahoo/yandex/startpage/google/wikipedia/grokipedia). Multiple = cross-backend consensus.")
+    source: str = Field(default="", description="Backend(s) that returned this result (duckduckgo/brave/yahoo/yandex/wikipedia/grokipedia). Multiple = cross-backend consensus.")
     position: int = Field(default=0, description="1-indexed rank after merge + rerank")
     relevance_score: float = Field(default=0.0, description="0.0-1.0 relevance to the query (neural cross-encoder score in neural mode, min-max normalized), boosted by cross-backend consensus. 1.0 = most relevant in this set.")
     fetch_relevance: str = Field(default="", description="high|med|low - relative relevance hint. smart_fetch what matches your need; the tiers rank results but a lower tier can be the right one - use your judgment.")
@@ -870,8 +870,8 @@ async def smart_search(
     freshness: Optional[str] = None,
 ) -> SearchResponseModel:
     """Local keyless web search (no API key, no account). The default pool
-    (duckduckgo, brave, mojeek, yahoo, yandex, startpage, google, qwant - eight
-    independent indexes, all HTTP, no browser; add 'wikipedia' or 'grokipedia')
+    (duckduckgo, brave, yahoo, yandex - four independent indexes, all HTTP,
+    no browser; add 'wikipedia' or 'grokipedia')
     is scraped in parallel, merged, deduped, and ranked. A URL returned
     by several independent engines is a consensus hit (engines_consensus field) and
     gets a ranking boost - a free authority signal. Returns URLs + ranking (NOT

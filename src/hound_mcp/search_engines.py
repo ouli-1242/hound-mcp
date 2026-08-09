@@ -7,8 +7,8 @@ thin hound-side adapter: maps hound's smart_search params (engines, freshness,
 site, region, page) onto the metasearch, maps results back to RawResult with
 cross-backend consensus, and builds the per-engine reports.
 
-Backends (all keyless): duckduckgo, brave, google, startpage, grokipedia,
-wikipedia, yahoo, mojeek, yandex. Bing is disabled (DDG + Yahoo already serve
+Backends (all keyless): duckduckgo, brave, grokipedia,
+wikipedia, yahoo, yandex. Bing is disabled (DDG + Yahoo already serve
 its index). They run in PARALLEL; a backend that CAPTCHAs / rate-limits / has
 no topic-match just yields nothing and the others carry. Search is 100% HTTP
 (no browser) - the single Patchright browser stays for smart_fetch only.
