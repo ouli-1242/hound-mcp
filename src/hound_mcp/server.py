@@ -1252,6 +1252,60 @@ def _safe_cookie_dict(cookies: Sequence[SetCookieParam] | None) -> Optional[Dict
     return result or None
 
 
+# ─── options bag validation ────────────────────────────────────────
+# The advertised schemas set additionalProperties: True on `options`, so a
+# typo'd key used to be silently dropped — the parameter no-ops while the
+# call still looks successful (the worst failure mode for an agent). Every
+# tool validates its options against its known keys before forwarding;
+# unknown keys raise so the agent sees the supported set instead.
+#
+# Per tool: ALLOWED = every key that may appear in options (documented +
+# promoted-fallback keys), FORWARDED = the subset actually passed through
+# to the method (promoted keys are already forwarded as explicit args, so
+# re-forwarding them via **kw would raise a duplicate-keyword TypeError).
+_SF_OPTIONS_ALLOWED = frozenset({
+    "css_selector", "max_content_chars", "timeout", "pages", "password",
+    "proxy", "cookies", "extra_headers", "useragent", "wait", "network_idle",
+    "headless", "real_chrome", "main_content_only", "use_trafilatura",
+    "solve_cloudflare", "block_webrtc", "hide_canvas",
+    "include_media", "include_links",
+})
+_SF_OPTIONS_FORWARDED = frozenset(
+    _SF_OPTIONS_ALLOWED
+    - {"css_selector", "max_content_chars", "timeout", "pages", "password"}
+)
+_SC_OPTIONS = frozenset({
+    "max_pages", "max_depth", "path_include", "path_exclude",
+    "max_content_chars_per", "max_total_chars", "concurrency",
+    "cache_ttl", "force_fetcher", "timeout", "deadline_ms", "sitemap",
+})
+_SHOT_OPTIONS = frozenset({
+    "full_page", "image_type", "quality", "wait", "wait_selector",
+    "network_idle", "timeout",
+})
+_SS_OPTIONS = frozenset({
+    "max_results", "cache_ttl", "mode", "engines", "url",
+    "site", "exclude_sites", "location", "language", "region", "page",
+    "freshness", "fetch_content", "fetch_schema",
+})
+
+
+def _strict_options(options: dict, allowed: frozenset, forwarded: frozenset, tool: str) -> dict:
+    """Validate an options bag and return only the keys to forward.
+
+    Raises ValueError listing the unknown keys and the supported set, so a
+    misspelled option surfaces as an explicit tool error instead of a silent
+    no-op.
+    """
+    unknown = set(options) - allowed
+    if unknown:
+        raise ValueError(
+            f"Unsupported option key(s) for {tool}: {sorted(unknown)}. "
+            f"Supported keys: {sorted(allowed)}"
+        )
+    return {k: v for k, v in options.items() if k in forwarded}
+
+
 # ─── Main server class ─────────────────────────────────────────────
 
 class MasterFetchServer:
@@ -3358,12 +3412,7 @@ class MasterFetchServer:
             timeout = args.get("timeout") if args.get("timeout") is not None else options.get("timeout")
             pages = args.get("pages") if args.get("pages") is not None else options.get("pages")
             password = args.get("password") if args.get("password") is not None else options.get("password")
-            kw = {k: v for k, v in options.items() if k in (
-                "proxy", "cookies", "extra_headers", "useragent",
-                "wait", "network_idle", "headless", "real_chrome",
-                "main_content_only", "use_trafilatura", "solve_cloudflare", "block_webrtc", "hide_canvas",
-                "include_media", "include_links",
-            )}
+            kw = _strict_options(options, _SF_OPTIONS_ALLOWED, _SF_OPTIONS_FORWARDED, "smart_fetch")
             result = await self.smart_fetch(
                 url=url, urls=urls,
                 extraction_type=args.get("extraction_type", "markdown"),
@@ -3382,12 +3431,7 @@ class MasterFetchServer:
             return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
 
         elif name == "smart_crawl":
-            kw = {k: v for k, v in options.items() if k in (
-                "max_pages", "max_depth", "path_include", "path_exclude",
-                "max_content_chars_per", "max_total_chars", "concurrency",
-                "cache_ttl", "force_fetcher", "timeout",
-                "deadline_ms", "sitemap",
-            )}
+            kw = _strict_options(options, _SC_OPTIONS, _SC_OPTIONS, "smart_crawl")
             result = await self.smart_crawl(
                 url=args["url"], discover_only=args.get("discover_only", False),
                 focus=args.get("focus"), crawl_urls=args.get("crawl_urls"),
@@ -3396,18 +3440,12 @@ class MasterFetchServer:
             return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
 
         elif name == "screenshot":
-            kw = {k: v for k, v in options.items() if k in (
-                "full_page", "image_type", "quality", "wait", "wait_selector", "network_idle", "timeout",
-            )}
+            kw = _strict_options(options, _SHOT_OPTIONS, _SHOT_OPTIONS, "screenshot")
             result = await self.screenshot(url=args["url"], session_id=args.get("session_id"), **kw)
             return result  # already list[ImageContent|TextContent]
 
         elif name == "smart_search":
-            kw = {k: v for k, v in options.items() if k in (
-                "max_results", "cache_ttl", "mode", "engines", "url",
-                "site", "exclude_sites", "location", "language", "region", "page",
-                "freshness", "fetch_content", "fetch_schema",
-            )}
+            kw = _strict_options(options, _SS_OPTIONS, _SS_OPTIONS, "smart_search")
             result = await self.smart_search(query=args["query"], **kw)
             return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
 
