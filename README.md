@@ -183,7 +183,7 @@ rm -rf ~/.hound                       # Linux/Mac
 | 搜索引擎限速 | 多样性仲裁 + 熔断器兜底；重度使用设 `HOUND_SEARCH_PROXY`。 |
 | 国内网（无 VPN）搜索 | 默认池含 bing / yandex（国内可达）；duckduckgo / brave / yahoo 需 VPN。 |
 | 域名 DNS 解析内网复查 | 默认关闭（DNS 污染环境会误伤）；需严格 SSRF 保护时设 `HOUND_SSRF_DNS_RECHECK=1`。 |
-| Bright Data SERP | 默认启用（随代码内置密钥，仅个人自用）；`HOUND_BRIGHTDATA_API_KEY=` 置空可禁用。 |
+| Bright Data SERP | 需自行配置：设置 `HOUND_BRIGHTDATA_API_KEY` 才启用（优先级后端）；未设置则只跑免费引擎。 |
 | 需要登录的网站 | 不支持（不在设计范围内）。 |
 | YouTube | 只能获取少量文本。 |
 

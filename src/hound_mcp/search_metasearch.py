@@ -82,9 +82,9 @@ _SEARCH_DEADLINE = float(os.environ.get("HOUND_SEARCH_DEADLINE", "16") or "16")
 _ua = UserAgent()
 
 # Bright Data SERP API (priority backend when configured)
-# 用户自用：硬编码默认密钥（HOUND_BRIGHTDATA_API_KEY 可覆盖为空则禁用）。
-# 注意：此密钥随代码分发，仅适合个人自用；若共享/发布代码请移除。
-_BRIGHTDATA_API_KEY = os.environ.get("HOUND_BRIGHTDATA_API_KEY") or "a2646fc2-1de1-469f-aa83-910efd45dfd0"
+# 需自行配置：设置 HOUND_BRIGHTDATA_API_KEY 启用，未设置（或置空）则禁用该后端。
+# 此仓库为公开仓库，密钥只从环境变量读取，严禁硬编码进源码。
+_BRIGHTDATA_API_KEY = os.environ.get("HOUND_BRIGHTDATA_API_KEY") or ""
 _BRIGHTDATA_ZONE = os.environ.get("HOUND_BRIGHTDATA_ZONE", "hound")
 _BRIGHTDATA_ENDPOINT = "https://api.brightdata.com/request"
 _BRIGHTDATA_COUNTRY = os.environ.get("HOUND_BRIGHTDATA_COUNTRY", "us")  # Google result region
