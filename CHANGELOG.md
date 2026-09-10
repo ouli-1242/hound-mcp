@@ -5,6 +5,11 @@ backfilled here — see `git log` and the GitHub releases page for history.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+> **Versioning note.** From 13.14 on this is a personal derivative work and no
+> longer tracks the upstream project's releases, so its version numbers are its
+> own and are not comparable to upstream's. `__version__` in
+> `src/hound_mcp/__init__.py` is the single source of truth.
+
 ## [Unreleased]
 
 ### Fixed
