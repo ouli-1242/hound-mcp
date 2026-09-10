@@ -12,16 +12,13 @@ Tests cover:
 - Metasearch integration (proxy selected per call, health marked)
 """
 
-import os
 import time
 import json
-import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock, AsyncMock
 import pytest
 
 from hound_mcp.search_proxy import (
-    ProxyPool, _validate_proxy, _read_config_file, _read_env_var,
+    ProxyPool, _validate_proxy, _read_env_var,
     load_proxies, get_proxy_pool, get_next_proxy,
     MAX_PROXIES,
 )
@@ -389,7 +386,7 @@ class TestCrawlProxyIntegration:
 
         server = MasterFetchServer()
         import asyncio
-        result = asyncio.run(server.smart_crawl(
+        asyncio.run(server.smart_crawl(
             "https://example.com/", max_pages=1, cache_ttl=0,
         ))
 

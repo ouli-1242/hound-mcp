@@ -27,7 +27,7 @@ from asyncio import gather, Lock, sleep as asyncio_sleep, to_thread as asyncio_t
 from datetime import datetime, timezone
 from time import time as now
 from dataclasses import dataclass, field
-from typing import Annotated, Mapping, Sequence, Optional, Literal, Union, Dict, List, Any, TYPE_CHECKING
+from typing import Annotated, Mapping, Sequence, Optional, Literal, Dict, List, Any, TYPE_CHECKING
 from urllib.parse import urlparse
 import warnings as _warnings
 import traceback as _traceback
@@ -143,7 +143,7 @@ async def _fallback_http_get(
 
 if TYPE_CHECKING:
     from hound_mcp.fetcher import Response as _HoundResponse
-    from hound_mcp.browser import StealthyBrowser
+    from hound_mcp.crawl import CrawlResponseModel
     from hound_mcp.search import SearchResponseModel
     from mcp.types import ImageContent, TextContent
 
@@ -962,7 +962,7 @@ def _extract_pdf_response(body: bytes, raw_ct: str, total_size: int, url: str,
 
 
 def _translate_response(
-    page: _ScraplingResponse,
+    page: _HoundResponse,
     extraction_type: str,
     css_selector: Optional[str],
     main_content_only: bool,
@@ -1158,7 +1158,7 @@ def _translate_response(
     )
 
 
-def _check_response_size(page: _ScraplingResponse) -> None:
+def _check_response_size(page: _HoundResponse) -> None:
     """Raise if response body exceeds safety limit."""
     body = getattr(page, 'body', None)
     if body and isinstance(body, bytes) and len(body) > MAX_RESPONSE_BYTES:
@@ -1997,8 +1997,12 @@ class MasterFetchServer:
         validate_css_selector(css_selector)
         validate_proxy(proxy)
 
-        normalized_proxy_auth = _normalize_credentials(proxy_auth)
-        normalized_auth = _normalize_credentials(auth)
+        # 凭据只做校验（非法时抛 ValueError / SecurityError）。
+        # 已知缺口：HTTPSession / http_get 目前不接受 auth / proxy_auth，
+        # 所以这两个参数校验后并不会真正作用到请求上（历史遗留，未在本次
+        # 审计中改动请求行为）。此处保留校验以维持既有语义。
+        _normalize_credentials(proxy_auth)
+        _normalize_credentials(auth)
         use_tf = use_trafilatura and extraction_type in ("markdown", "text", "article", "structured")
 
         from hound_mcp.fetcher import HTTPSession
@@ -2664,7 +2668,6 @@ class MasterFetchServer:
             from hound_mcp.fetcher import tcp_preflight
             reachable, preflight_category = await asyncio_to_thread(tcp_preflight, url, 2.0)
             if not reachable and preflight_category in ("connection_refused", "dns_failure"):
-                from hound_mcp.errors import get_hint
                 elapsed = (now() - start_time) * 1000
                 result = ResponseModel(
                     url=url, status=0, content=[""],
@@ -3113,7 +3116,7 @@ class MasterFetchServer:
         deadline_ms: int = 120000,
         sitemap: str | bool = False,
         search: Optional[str] = None,
-    ) -> "CrawlResponseModel":
+    ) -> CrawlResponseModel:
         """Deep-crawl a site: best-first same-domain from `url`, returning each
         page as markdown with content_ok/summary/page_type. discover_only=true
         returns the URL map only. `focus` prioritizes relevant pages AND
@@ -3396,7 +3399,7 @@ class MasterFetchServer:
         - (content_list, structured_dict) for tools with structured output
         - content_list for tools with mixed content (e.g. screenshot with ImageContent)
         """
-        from mcp.types import TextContent, ImageContent
+        from mcp.types import TextContent
 
         options = args.get("options") or {}
 

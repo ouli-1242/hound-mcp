@@ -388,7 +388,7 @@ async def _sitemap_map(url: str, path_include: Optional[list[str]],
     success (sitemap found + parsed), or None if no sitemap was reachable so the
     caller can fall back to BFS ('auto'). Same-domain + path filters applied.
     Caps the returned URL map at max(1000, max_pages*10)."""
-    from hound_mcp.sitemap import discover_sitemap, SitemapURL
+    from hound_mcp.sitemap import discover_sitemap
 
     def _make_http_get():
         from hound_mcp.search_proxy import get_next_proxy

@@ -6,12 +6,10 @@ All async, real SQLite operations. No mocks.
 """
 
 import asyncio
-import time
 import pytest
-from pathlib import Path
 from hound_mcp.cache import (
     get_cached, set_cached, clear_cache, clear_all_cache,
-    _cache_key, DEFAULT_TTL, MAX_CACHE_ENTRIES,
+    _cache_key,
 )
 
 

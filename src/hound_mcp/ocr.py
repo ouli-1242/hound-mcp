@@ -31,8 +31,12 @@ from __future__ import annotations
 
 import io
 import logging
-import re
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:  # pragma: no cover - annotation-only import
+    # pdf_extractor is imported lazily inside ocr_pdf() to keep this module
+    # importable without the PDF extras; the annotation needs the name here.
+    from hound_mcp.pdf_extractor import PdfResult
 
 logger = logging.getLogger("hound-mcp.ocr")
 
@@ -136,7 +140,7 @@ def ocr_pdf(
     body: bytes,
     pages: Optional[str] = None,
     password: Optional[str] = None,
-) -> "PdfResult":
+) -> PdfResult:
     """OCR a scanned/image-only PDF. Returns a PdfResult.
 
     On success: ``content`` is a one-element markdown string with a header +

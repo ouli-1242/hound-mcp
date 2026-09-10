@@ -58,7 +58,7 @@ def _heading_level(block: str) -> int:
 
 def _is_table(block: str) -> bool:
     """True if the block looks like a markdown table (has | and --- separators)."""
-    lines = [l for l in block.splitlines() if l.strip()]
+    lines = [line for line in block.splitlines() if line.strip()]
     if len(lines) < 2:
         return False
     return "|" in lines[0] and "---" in lines[1] if len(lines) > 1 else False
@@ -70,10 +70,12 @@ def _is_code(block: str) -> bool:
     if stripped.startswith("```"):
         return True
     lines = block.splitlines()
-    non_blank = [l for l in lines if l.strip()]
+    non_blank = [line for line in lines if line.strip()]
     if not non_blank or len(non_blank) < 2:
         return False
-    indented = sum(1 for l in non_blank if l.startswith("    ") or l.startswith("\t"))
+    indented = sum(
+        1 for line in non_blank if line.startswith("    ") or line.startswith("\t")
+    )
     return indented >= len(non_blank) * 0.8
 
 

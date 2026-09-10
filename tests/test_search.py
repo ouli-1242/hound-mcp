@@ -9,12 +9,10 @@ real search results.
 
 import asyncio
 import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
 from hound_mcp import search as search
 from hound_mcp import search_engines as se
 from hound_mcp.search_engines import (
-    _passes_site_filter, _normalize_domain, _is_domain_or_subdomain,
-    RawResult, EngineReport, multi_search,
+    _passes_site_filter, _normalize_domain, RawResult, EngineReport, multi_search,
     DEFAULT_ENGINES, _INDEX_FAMILY,
 )
 
@@ -443,7 +441,6 @@ class TestSearchProxyValidation:
     def test_all_engines_construction_failure_raises(self):
         """If every engine fails to construct (bad deps, etc), raise an error
         instead of silently returning 0 results."""
-        import asyncio
         import hound_mcp.search_metasearch as m
 
         class BrokenEngine:

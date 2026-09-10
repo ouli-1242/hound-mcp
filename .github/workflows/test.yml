@@ -1,0 +1,41 @@
+name: Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        include:
+          # Windows 只跑 3.11：历史上 3.12/3.13 的 Windows job 会挂起
+          # （见 git log "ci: drop Windows 3.12/3.13"），覆盖率由 Ubuntu 保证。
+          - os: windows-latest
+            python-version: "3.11"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run tests
+        # e2e 测试会真实拉起 hound.exe 子进程，默认跳过（见 pyproject 的 addopts）
+        run: python -m pytest -q

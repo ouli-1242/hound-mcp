@@ -17,7 +17,6 @@ from __future__ import annotations
 import csv
 import logging
 import os
-from typing import Optional
 
 logger = logging.getLogger("hound_mcp.parse")
 
@@ -106,7 +105,6 @@ def _parse_html(file_path: str) -> str:
 def _parse_docx(file_path: str) -> str:
     """Parse .docx to Markdown using python-docx."""
     from docx import Document
-    from docx.table import Table
 
     doc = Document(file_path)
     lines: list[str] = []

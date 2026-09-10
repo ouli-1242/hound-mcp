@@ -1131,7 +1131,6 @@ class BrowserSession:
                 # patchright (it patches Runtime.enable). add_init_script uses
                 # Routes which breaks DNS. Instead, we use wait_until='commit'
                 # + page.evaluate() to inject patches before page JS runs.
-                stealth_injected = False
 
                 if actual_extra_headers:
                     await page.set_extra_http_headers(actual_extra_headers)
@@ -1177,7 +1176,6 @@ class BrowserSession:
                 if self._init_script and first_response:
                     try:
                         await page.evaluate(self._init_script)
-                        stealth_injected = True
                     except Exception as e:
                         logger.debug(f"Stealth script injection error: {e}")
 

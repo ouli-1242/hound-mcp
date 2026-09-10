@@ -23,7 +23,9 @@ def __getattr__(name: str):
         "main",
     }
     if name in _lazy_exports:
-        from hound_mcp.server import (  # noqa: E402
+        # F401：这些名字通过下方 locals()[name] 返回，是刻意的惰性再导出，
+        # ruff 看不到用法，故显式豁免。
+        from hound_mcp.server import (  # noqa: F401
             MasterFetchServer,
             ResponseModel,
             BulkResponseModel,

@@ -217,7 +217,7 @@ class TestCrawlNetworkDiagnostics:
 
     def test_all_pages_network_failure(self):
         """When all pages fail with network errors, next_action should not be empty."""
-        from hound_mcp.crawl import CrawlPage, CrawlResponseModel
+        from hound_mcp.crawl import CrawlPage
         # Simulate what smart_crawl does at the end
         pages = [
             CrawlPage(url="https://example.com/1", depth=0, status=-1,
@@ -226,7 +226,6 @@ class TestCrawlNetworkDiagnostics:
                      content_ok=False, error="net::ERR_CONNECTION_REFUSED"),
         ]
         # Replicate the diagnostic logic from crawl.py
-        ok = sum(1 for p in pages if p.content_ok)
         network_failures = sum(1 for p in pages if p.status == -1 or p.status == 0)
         assert network_failures == 2
         assert network_failures >= len(pages) * 0.5

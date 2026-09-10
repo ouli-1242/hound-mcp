@@ -98,9 +98,9 @@ def extract_metadata(html: str, url: str) -> dict[str, Any]:
 
     # html lang.
     if "lang" not in meta:
-        l = _LANG_RE.search(html)
-        if l:
-            meta["lang"] = l.group(1).strip()
+        lang_match = _LANG_RE.search(html)
+        if lang_match:
+            meta["lang"] = lang_match.group(1).strip()
 
     # JSON-LD: datePublished / author / description / headline.
     for m in _LD_RE.finditer(html):

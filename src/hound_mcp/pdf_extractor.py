@@ -352,7 +352,6 @@ def _quality_score(text: str) -> float:
     over total chars. ~1.0 = clean; low = garbled (CID garbage not OCR-recovered)."""
     if not text:
         return 0.0
-    cid_garbage = sum(len(m) for m in _CID_RE.findall(text))
     clean = _CID_RE.sub("", text)
     printable = sum(1 for ch in clean if ch.isprintable() or ch in "\n\t ")
     # printable is over the cid-stripped text; score it against the ORIGINAL len
@@ -733,7 +732,7 @@ def _render_page(page: Any, body_size: float, text_mode: bool,
 
 
 def _dehyphenate_block(text: str, text_mode: bool) -> str:
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return ""
     joined = lines[0]

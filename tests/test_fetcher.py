@@ -6,8 +6,8 @@ HTTPSession tests use minimal mocking only for the primp client.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from hound_mcp.fetcher import Response, HTTPSession, http_get, _extract_encoding
+from unittest.mock import MagicMock
+from hound_mcp.fetcher import Response, HTTPSession, _extract_encoding
 
 
 # ─── Response class ───────────────────────────────────────────────

@@ -27,7 +27,6 @@ from hound_mcp.server import MasterFetchServer
 @pytest.mark.asyncio
 async def test_feed_fetch_returns_dict_structured(mock_logger=None):
     """feed_fetch 分支应返回 dict structured_content（list 会 -32603）。"""
-    from mcp.types import CallToolResult, TextContent
 
     srv = MasterFetchServer(cache_ttl=0)
     args = {"urls": ["https://example.com/feed"], "max_items": 3}
@@ -166,7 +165,6 @@ def test_dns_recheck_off_by_default(monkeypatch):
 def test_dns_recheck_accepts_public_resolution(monkeypatch):
     """开启时解析到公网 IP 应放行。"""
     monkeypatch.setenv("HOUND_SSRF_DNS_RECHECK", "1")
-    sp = __import__("hound_mcp.security", fromlist=["_dns_recheck_enabled"])
     with patch("socket.getaddrinfo",
                return_value=[(2, 1, 6, "", ("93.184.216.34", 0))]):
         assert validate_url("https://example.com/x") == "https://example.com/x"

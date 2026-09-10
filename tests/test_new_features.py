@@ -1,8 +1,7 @@
 """Tests for new features: fetch_content, schema auto, batch structured extraction."""
 
-import pytest
 
-from hound_mcp.structured import extract_structured, _extract_auto
+from hound_mcp.structured import extract_structured
 
 
 # ─── Schema auto mode ─────────────────────────────────────────────────────────

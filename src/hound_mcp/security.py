@@ -357,7 +357,7 @@ def validate_css_selector(selector: Optional[str]) -> Optional[str]:
     lowered = selector.lower()
     for d in dangerous:
         if d in lowered:
-            raise SecurityError(f"CSS selector contains potentially dangerous content")
+            raise SecurityError("CSS selector contains potentially dangerous content")
 
     return selector
 

@@ -28,7 +28,7 @@ it reached.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger("hound-mcp.actions")
 

@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Optional
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +119,6 @@ async def fetch_source_for_similar(url: str, *, timeout: int = 10, max_chars: in
     try:
         from hound_mcp.fetcher import HTTPSession
         from hound_mcp.search_metasearch import _PROXY as _p
-        from urllib.parse import urlparse as _up
         from bs4 import BeautifulSoup
         # rotation pool kept here (not imported from the removed SERL module)
         _pool = ["chrome", "safari", "firefox", "edge"]
@@ -128,7 +127,6 @@ async def fetch_source_for_similar(url: str, *, timeout: int = 10, max_chars: in
             resp = await sess.get(url, timeout=timeout)
             text = (getattr(resp, "body", None) or b"").decode(
                 getattr(resp, "encoding", None) or "utf-8", errors="replace")
-            status = getattr(resp, "status", 0) or 0
     except Exception:
         return "", ""
     if not text:

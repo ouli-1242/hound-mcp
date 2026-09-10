@@ -19,6 +19,8 @@ from urllib.parse import urljoin, urlparse
 
 import primp
 
+from hound_mcp.security import redact_api_key
+
 logger = logging.getLogger("hound_mcp.fetcher")
 
 
@@ -500,8 +502,12 @@ class HTTPSession:
             except Exception as e:
                 last_error = e
                 if attempt < actual_retries:
+                    # 必须脱敏：primp/httpx 的异常文本会带上完整代理 URL
+                    # （形如 http://user:pass@host），直接写日志等于把代理凭据
+                    # 落进日志。项目里已有 redact_api_key，这里此前漏用。
                     logger.warning(
-                        f"HTTP fetch attempt {attempt + 1} failed for {url}: {str(e)[:200]}. "
+                        f"HTTP fetch attempt {attempt + 1} failed for {url}: "
+                        f"{redact_api_key(str(e)[:200])}. "
                         f"Retrying in {self._retry_delay}s..."
                     )
                     await asyncio.sleep(self._retry_delay)
@@ -557,7 +563,6 @@ def tcp_preflight(url: str, timeout: float = 2.0) -> tuple[bool, str]:
     Never raises.
     """
     import socket
-    from urllib.parse import urlparse
     try:
         parsed = urlparse(url)
         host = parsed.hostname

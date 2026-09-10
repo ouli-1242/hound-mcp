@@ -6,10 +6,7 @@ tested via the actual module structure (stdlib-only at module level).
 """
 
 import os
-import sys
-import pytest
-from unittest.mock import patch, MagicMock
-from hound_mcp.cli import main, _run_repair
+from hound_mcp.cli import _run_repair
 from hound_mcp.updater import check_version, pad_version, _at_or_ahead
 
 

@@ -1,6 +1,8 @@
 [project]
 name = "hound-mcp"
-version = "99.0.0"
+# 版本单一来源：src/hound_mcp/__init__.py 的 __version__。
+# 历史上这里有硬编码的哨兵值 99.0.0，与 CLI 报的版本 / PyPI 上的版本三处不一致。
+dynamic = ["version"]
 description = "Web research for AI agents. Fetch any page with anti-bot bypass plus web search. $0 forever. No scrapling dependency: hound uses primp + patchright directly. Graceful degradation when browser deps are unavailable (HTTP-only mode on Termux/Android). Token-optimized tool definitions, polished cross-platform CLI, brick-proof self-update with hound doctor + rollback."
 readme = "README.md"
 authors = [{name = "ouli-1242", email = "ouli1242@gmail.com"}]
@@ -24,6 +26,16 @@ dependencies = [
     "cssselect>=1.2",
     # Content extraction (HTML->markdown fallback):
     "markdownify>=1.2.0",
+    # Directly imported by search_engines.fetch_source_for_similar for title
+    # extraction. It used to resolve only transitively (or not at all — the
+    # import is inside a try/except, so a missing bs4 silently degraded that
+    # path to an empty result). Declared explicitly now.
+    "beautifulsoup4>=4.12",
+    # Directly imported at module level by search_metasearch.py. h2 arrives
+    # via the httpx[http2] extra and httpcore is httpx's own core dep, but
+    # importing them directly without declaring them is a latent break.
+    "h2>=4.0",
+    "httpcore>=1.0,<2.0",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -44,6 +56,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-mock>=3.14",
+    "ruff>=0.6",
 ]
 all = [
     # Browser deps (patchright for anti-detect browser, playwright for JS
@@ -76,6 +89,10 @@ hound = "hound_mcp.cli:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.version]
+# 唯一的版本定义处：CLI 的 hound -v、pip show、PyPI 元数据都读它
+path = "src/hound_mcp/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/hound_mcp"]
 
@@ -89,4 +106,18 @@ pythonpath = ["src"]
 addopts = ["-m", "not e2e"]
 markers = [
     "e2e: end-to-end tests that spawn a real hound.exe subprocess. Skip by default in CI; run manually with `pytest -m e2e`.",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+# 起步用 ruff 的默认规则集（pycodestyle 错误 E4/E7/E9 + pyflakes F），
+# 保证基线可通过；后续可按需收紧（I / UP / B / SIM 等）。
+select = ["E4", "E7", "E9", "F"]
+ignore = [
+    # 有意的延迟导入：patchright / playwright / rapidocr / numpy 等重依赖
+    # 只在使用点 import，以保住冷启动速度和 HTTP-only 降级模式。
+    "E402",
 ]

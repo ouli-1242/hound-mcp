@@ -18,6 +18,7 @@ Max 20 proxies. State is in-memory only (resets on restart).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -271,23 +272,31 @@ _health_task: "asyncio.Task | None" = None
 
 def _kick_health_check() -> None:
     """Start the background proxy health probe once per process (no-op after)."""
-    import asyncio
     global _health_task
     if _health_task is not None:
+        return
+    # 必须先确认有运行中的事件循环，再创建协程：
+    # 直接写 asyncio.create_task(pool.health_check()) 时，协程对象先被求值，
+    # 若 create_task 抛 RuntimeError（无事件循环），该协程已被创建却被丢弃，
+    # 触发 "coroutine 'ProxyPool.health_check' was never awaited" 警告。
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running event loop (called outside async context) — skip; the
+        # next search that creates the pool retries.
         return
     pool = get_proxy_pool()
     if pool is None:
         return
-    try:
-        _health_task = asyncio.create_task(pool.health_check())
 
-        def _on_done(_t: "asyncio.Task") -> None:
-            # 任务完成后置回 None，让下一次搜索能重新探测新加入/恢复的代理
-            global _health_task
-            _health_task = None
+    _health_task = loop.create_task(pool.health_check())
 
-        _health_task.add_done_callback(_on_done)
-    except RuntimeError:
-        # No running event loop (called outside async context) — skip; the
-        # next search that creates the pool retries.
-        pass
+    def _on_done(t: "asyncio.Task") -> None:
+        # 任务完成后置回 None，让下一次搜索能重新探测新加入/恢复的代理
+        global _health_task
+        _health_task = None
+        # 取回异常，否则失败的探测会打 "exception was never retrieved"
+        if not t.cancelled() and t.exception() is not None:
+            logger.debug("proxy health probe failed: %r", t.exception())
+
+    _health_task.add_done_callback(_on_done)

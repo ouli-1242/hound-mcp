@@ -3,7 +3,6 @@
 import os
 import tempfile
 
-import pytest
 
 from hound_mcp.parse import parse_file, SUPPORTED_EXTENSIONS, MAX_PARSE_FILE_SIZE
 

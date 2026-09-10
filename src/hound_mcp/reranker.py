@@ -19,7 +19,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-import os
 import asyncio
 import urllib.request
 from pathlib import Path

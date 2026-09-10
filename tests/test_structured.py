@@ -1,6 +1,5 @@
 """Tests for structured data extraction (structured.py)."""
 
-import pytest
 
 from hound_mcp.structured import extract_structured
 

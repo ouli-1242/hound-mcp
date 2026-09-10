@@ -5,7 +5,6 @@ Adversarial: empty query is no-op, single block is no-op, no matching terms
 returns fallback blocks, heading context preserved.
 """
 
-import pytest
 from hound_mcp.focus import (
     focus_content, _split_blocks, _tokens, _is_heading, _is_table, _is_code,
 )

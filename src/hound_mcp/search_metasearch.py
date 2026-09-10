@@ -32,7 +32,6 @@ from dataclasses import dataclass
 from functools import cached_property
 from random import SystemRandom
 from time import time
-from types import TracebackType
 from typing import Any, ClassVar, Optional, TypeVar
 from urllib.parse import quote, unquote_plus, urlparse
 
