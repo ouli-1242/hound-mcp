@@ -71,3 +71,6 @@ docs/hound-demo.mp4
 pi-extension/.npmrc
 node_modules/
 package-lock.json
+
+# Lint cache (ruff writes .ruff_cache/.gitignore, this is belt-and-braces)
+.ruff_cache/
