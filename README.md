@@ -189,4 +189,18 @@ rm -rf ~/.hound                       # Linux/Mac
 
 ---
 
+## 致谢
+
+本项目是 [dondai1234/master-fetch](https://github.com/dondai1234/master-fetch) 的**二创**（衍生作品）。上游以 MIT 协议发布，本仓库在其基础上做了裁剪与本地化改造（精简可选组件、调整工具与配置等）。
+
+按 MIT 协议要求，上游的原始版权与许可文本已完整保留：
+
+- 上游项目：https://github.com/dondai1234/master-fetch
+- 上游原始版权：Copyright (c) 2026 Bishesh Bhandari
+- 本仓库改造部分：Modifications Copyright (c) 2026 ouli-1242
+
+此外，`src/hound_mcp/search_metasearch.py` 派生自 [ddgs](https://github.com/deedy5/ddgs)，相关声明见 [NOTICE.ddgs.txt](NOTICE.ddgs.txt)。
+
+---
+
 **MIT 协议**
