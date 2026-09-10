@@ -627,7 +627,7 @@ class TestBulkGetEnvelope:
         assert result.is_official is True
 
 
-# ─── Stealthy proxy bypass (upstream 12.2.0 / PR #20) ─────────────
+# ─── Stealthy proxy bypass ─────────────
 
 class TestSmartFetchProxy:
 
@@ -673,7 +673,7 @@ class TestSmartFetchProxy:
         assert server.stealthy_fetch.await_args.kwargs["session_id"] is None
 
 
-# ─── Focus context scoping (upstream #27) ─────────────────────────
+# ─── Focus context scoping ─────────────────────────
 
 class TestSmartFetchFocusContext:
     """smart_fetch request options must be scoped per invocation: focus set in

@@ -46,6 +46,34 @@ __all__ = [
 ]
 
 
+# ─── self-update source ────────────────────────────────────────────────────
+# This is a personal derivative work. The ``hound-mcp`` distribution on PyPI
+# belongs to the *upstream* project, so the historical self-update path
+# (``pip install hound-mcp==<latest>``) would install upstream code over this
+# fork. Self-update is therefore OFF by default, and ``hound -u`` points at the
+# source tree instead.
+#
+# Re-enable it only after publishing your own distribution:
+#   HOUND_UPDATE_PACKAGE=<distribution name on PyPI>
+#   HOUND_UPDATE_INDEX_URL=<optional index url>
+_DIST_NAME = "hound-mcp"   # the distribution this fork is installed as
+
+
+def update_package() -> str:
+    """Distribution to self-update FROM; empty string means self-update is off."""
+    return (os.environ.get("HOUND_UPDATE_PACKAGE") or "").strip()
+
+
+def _dist() -> str:
+    """Distribution name used when building pip commands."""
+    return update_package() or _DIST_NAME
+
+
+def update_index_url() -> str | None:
+    """Optional index url for the self-update pip call."""
+    return (os.environ.get("HOUND_UPDATE_INDEX_URL") or "").strip() or None
+
+
 # ─── version probing ───────────────────────────────────────────────────────
 
 def check_version() -> tuple[str, str | None, bool | None]:
@@ -53,21 +81,28 @@ def check_version() -> tuple[str, str | None, bool | None]:
 
     installed: the importlib.metadata version, or "unknown" if the package
     metadata is missing (a half-failed install / brick). latest: the current
-    PyPI version, or None if PyPI is unreachable. is_current: latest == installed
-    when latest is known, else None.
+    PyPI version, or None when PyPI is unreachable *or* self-update is disabled.
+    is_current: latest == installed when latest is known, else None.
     """
     from importlib.metadata import version as _get_version
     try:
-        installed = _get_version("hound-mcp")
+        installed = _get_version(_DIST_NAME)
     except Exception:
         installed = "unknown"
+
+    dist = update_package()
+    if not dist:
+        # Self-update is disabled in this fork: do not even hit the network.
+        # Querying `hound-mcp` on PyPI would advertise the upstream project's
+        # release as an update for this fork.
+        return installed, None, None
 
     latest: str | None = None
     try:
         import json
         from urllib.request import urlopen, Request
         req = Request(
-            "https://pypi.org/pypi/hound-mcp/json",
+            f"https://pypi.org/pypi/{dist}/json",
             headers={"User-Agent": "Hound/" + installed},
         )
         with urlopen(req, timeout=5) as resp:
@@ -255,7 +290,12 @@ def _write_repair_script() -> None:
     """(Re)write ~/.hound/repair.py so the brick-recovery safety net exists."""
     try:
         with open(repair_script_path(), "w", encoding="utf-8") as f:
-            f.write(_REPAIR_SCRIPT.replace("__REPAIR__", repair_script_path()))
+            f.write(
+                _REPAIR_SCRIPT
+                .replace("__REPAIR__", repair_script_path())
+                # 生成脚本里的包名跟随自更新源，避免把上游包名写死
+                .replace(_DIST_NAME, _dist())
+            )
     except OSError:
         pass  # home dir not writable; not fatal - the update can still proceed
 
@@ -280,9 +320,13 @@ def _pip_cmd(target: str) -> list[str]:
     (onnxruntime, tokenizers, rapidocr) are NOT pulled. Existing deps that
     are already satisfied are left alone by pip.
     """
-    return [sys.executable, "-m", "pip", "install",
-            f"hound-mcp=={target}", "--quiet", "--disable-pip-version-check",
-            "--no-python-version-warning"]
+    cmd = [sys.executable, "-m", "pip", "install",
+           f"{_dist()}=={target}", "--quiet", "--disable-pip-version-check",
+           "--no-python-version-warning"]
+    index = update_index_url()
+    if index:
+        cmd += ["--index-url", index]
+    return cmd
 
 
 def _heal_cmd(target: str) -> list[str]:
@@ -291,9 +335,13 @@ def _heal_cmd(target: str) -> list[str]:
     Uses NO --no-deps so missing core deps are installed. Does NOT include [all]
     so heavy extras are not pulled.
     """
-    return [sys.executable, "-m", "pip", "install", "--force-reinstall",
-            f"hound-mcp=={target}", "--quiet", "--disable-pip-version-check",
-            "--no-python-version-warning"]
+    cmd = [sys.executable, "-m", "pip", "install", "--force-reinstall",
+           f"{_dist()}=={target}", "--quiet", "--disable-pip-version-check",
+           "--no-python-version-warning"]
+    index = update_index_url()
+    if index:
+        cmd += ["--index-url", index]
+    return cmd
 
 
 
@@ -483,7 +531,7 @@ new = _ver()
 print("  Hound  v" + new + "  " + ("reinstalled" if FULL else "updated"))
 if servers_before:
     print("  restart your running hound server (PID " + ", ".join(str(p) for p in servers_before) + ") to use it")
-'''.replace("__PARENT_PID__", str(parent_pid)).replace("__TARGET__", repr(target)).replace("__REPAIR__", repr(repair_path)).replace("__EXE__", repr(_hound_launcher_path())).replace("__FULL__", str(full))
+'''.replace("__PARENT_PID__", str(parent_pid)).replace("__TARGET__", repr(target)).replace("__REPAIR__", repr(repair_path)).replace("__EXE__", repr(_hound_launcher_path())).replace("__FULL__", str(full)).replace(_DIST_NAME, _dist())
 
 
 def _spawn_helper(target: str, repair_path: str, parent_pid: int, full: bool = False) -> bool:
@@ -506,6 +554,14 @@ def do_update(target: str | None = None) -> None:
     None means the latest on PyPI. See the module docstring for the design."""
     from hound_mcp import cli_ui as ui
     installed, latest, _is_current = check_version()
+    if not update_package():
+        # Refuse even an explicit target: `pip install hound-mcp==X` pulls the
+        # UPSTREAM distribution, which is not this fork.
+        print(ui.branded(ui.ver(installed), ui.dim("self-update off")))
+        print("  " + ui.dim(f"personal fork - refusing to install {_dist()} from PyPI over it."))
+        print("  " + ui.dim("update with")
+              + "  " + ui.cmd("git pull && python -m pip install -e ."))
+        return
     if target is None:
         target = latest
 
@@ -577,6 +633,16 @@ def print_version() -> None:
             ui.dim("or:  hound -u  (reinstalls the latest version)"),
         ]
         print(ui.panel([ui.err("install corrupted")] + body, 62))
+        return
+    if not update_package():
+        # Self-update is intentionally off in this fork. Reporting "couldn't
+        # reach PyPI" here would be a lie: we never looked.
+        print(ui.panel([
+            ui.lr(ui.wordmark(), "", inner),
+            ui.lr(ui.ver(installed), ui.dim("self-update off"), inner),
+        ], W))
+        print("  " + ui.dim("personal fork - not updating from PyPI. update with")
+              + "  " + ui.cmd("git pull && python -m pip install -e ."))
         return
     if latest is None:
         print(ui.panel([

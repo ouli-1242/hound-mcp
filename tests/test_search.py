@@ -394,7 +394,7 @@ class TestEngineConfig:
         assert _INDEX_FAMILY["yandex"] == "yandex"
 
 
-# ─── Proxy validation (upstream 11.1.9) ───────────────────────────
+# ─── Proxy validation ───────────────────────────
 
 class TestSearchProxyValidation:
     def _load_with(self, monkeypatch, tmp_path, env_value):
@@ -465,7 +465,7 @@ class TestSearchProxyValidation:
             m._BRIGHTDATA_API_KEY = original_bd_key
 
 
-# ─── Result diversity (upstream v12.0.0) ──────────────────────────
+# ─── Result diversity ──────────────────────────
 
 class TestDiversify:
 
@@ -536,7 +536,7 @@ class TestDiversify:
         assert search._get_domain(r[1].url) == "medium.com"
 
 
-# ─── Intent-aware fan-out (upstream v12.0.0) ──────────────────────
+# ─── Intent-aware fan-out ──────────────────────
 
 class TestQueryMapIntegration:
 

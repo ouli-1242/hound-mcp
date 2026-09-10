@@ -725,7 +725,7 @@ def _url_relevance(query: str, url: str) -> float:
     return min(hits / len(q_terms), 1.0) * 0.08 if hits else 0.0
 
 
-# ─── intent-aware multi-query fan-out (upstream v12.0.0) ────────────────
+# ─── intent-aware multi-query fan-out ────────────────
 # Detect query intent and give the diversity engines (Yandex, Startpage, Google,
 # Qwant) an expanded query variant while core engines keep the original. Same
 # request count, zero added latency (all parallel), but higher recall because
@@ -1024,7 +1024,7 @@ async def smart_search(
             fetch_hint = (fetch_hint + " | " + rerank_note) if fetch_hint else rerank_note
         sim_related = _related_queries(derived_query, results_list)
     else:
-        # Intent-aware multi-query fan-out (upstream v12.0.0): detect intent
+        # Intent-aware multi-query fan-out: detect intent
         # and give diversity engines an expanded query variant while core engines
         # keep the original. Same request count, zero added latency, higher recall.
         _intent = _detect_intent(query)

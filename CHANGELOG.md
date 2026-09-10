@@ -37,6 +37,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `beautifulsoup4` (imported in `search_engines.py` — a missing install silently
   degraded that code path to an empty result), plus `h2` and `httpcore`, which
   were only resolving transitively through `httpx[http2,socks]`.
+- **Self-update no longer points at the upstream package.** This is a personal
+  derivative work, but `hound -u` used to run `pip install hound-mcp==<latest>` —
+  the *upstream* distribution — which would install upstream code over this
+  fork. Self-update is now off by default: `hound -v` reports `self-update off`,
+  and `hound -u` refuses (even for an explicit version target) and points at
+  `git pull && python -m pip install -e .` instead. Re-enable with
+  `HOUND_UPDATE_PACKAGE=<your distribution>` plus the optional
+  `HOUND_UPDATE_INDEX_URL`. The generated repair script and the Windows helper
+  follow the same distribution name.
+- Version numbers are this fork's own from 13.14 onward and are not comparable
+  to upstream's.
+- Removed `(upstream v12.0.0)`-style provenance markers from code comments and
+  test section headers.
+- Dropped the dangling `pi.extensions` entry from `package.json`: it pointed at
+  `pi-extension/extensions/hound.ts`, which is not in this repository.
 
 ### Added
 - `.github/workflows/test.yml` and `.github/workflows/lint.yml` — CI was absent
@@ -48,5 +63,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `auth` / `proxy_auth` on the fetch tools are validated but never applied:
   `HTTPSession` / `http_get` do not accept them. Preserved behaviour for now;
   see the comment at `src/hound_mcp/server.py` in `bulk_get`.
-- `package.json` still points at `pi-extension/extensions/hound.ts`, which is
-  not present in the repository.
+- `LICENSE` and `NOTICE.ddgs.txt` retain the original copyright notices. Stopping
+  the upstream *version* tracking does not change that: MIT requires the notices
+  to stay unless the code is rewritten.

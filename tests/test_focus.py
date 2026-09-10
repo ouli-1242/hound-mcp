@@ -130,7 +130,7 @@ class TestTokens:
         assert _tokens("") == []
 
 
-# ─── Heading-aware BM25 + table/code preservation (upstream v11.2.0) ──
+# ─── Heading-aware BM25 + table/code preservation ──
 
 class TestHeadingAwareBM25:
 
